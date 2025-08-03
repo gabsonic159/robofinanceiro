@@ -508,9 +508,7 @@ def main():
     
     carregar_tarefas_agendadas(application)
 
-    # --- Handlers de Conversa ---
-    # A ordem de adição é importante para evitar conflitos.
-    
+    # --- Definição das Conversas ---
     transacao_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(r'^[+\-]\s*(\d+(?:[.,]\d{1,2})?)\s*(.*)'), iniciar_processo_transacao)],
         states={
@@ -521,21 +519,26 @@ def main():
     )
 
     relatorio_conv = ConversationHandler(
-    # ### MUDANÇA 1 ###: Apague a parte do MessageHandler daqui
-    entry_points=[CommandHandler('relatorio', iniciar_relatorio)],
-    states={
-        ESCOLHER_PERIODO: [CallbackQueryHandler(processar_escolha_periodo, pattern="^rel_")],
-        AGUARDANDO_DATA_INICIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_inicio)],
-        AGUARDANDO_DATA_FIM: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_fim)],
-    },
-    fallbacks=[CommandHandler('cancelar', cancelar_conversa)],
-)
+        # ### A CORREÇÃO DEFINITIVA ESTÁ AQUI ###
+        # Ambos os pontos de entrada (comando e botão) estão DENTRO da definição da conversa.
+        entry_points=[
+            CommandHandler('relatorio', iniciar_relatorio),
+            MessageHandler(filters.Regex('^📊 Relatório$'), iniciar_relatorio)
+        ],
+        states={
+            ESCOLHER_PERIODO: [CallbackQueryHandler(processar_escolha_periodo, pattern="^rel_")],
+            AGUARDANDO_DATA_INICIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_inicio)],
+            AGUARDANDO_DATA_FIM: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_fim)],
+        },
+        fallbacks=[CommandHandler('cancelar', cancelar_conversa)],
+    )
     
-    # Adiciona as conversas primeiro, para que tenham prioridade sobre mensagens genéricas.
+    # --- Ordem de Adição Correta ---
+    # 1. Adiciona as conversas primeiro, para que tenham prioridade.
     application.add_handler(transacao_conv)
     application.add_handler(relatorio_conv)
 
-    # --- Handlers de Comandos Normais ---
+    # 2. Adiciona os comandos normais.
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("ajuda", ajuda))
     application.add_handler(CommandHandler("listarcategorias", list_categorias))
@@ -551,9 +554,8 @@ def main():
     application.add_handler(CommandHandler("ver_agendamentos", ver_agendamentos))
     application.add_handler(CommandHandler("cancelar_agendamento", cancelar_agendamento))
 
-    # --- Handlers de Botões Permanentes (que não iniciam conversas) ---
-    # O handler do "Relatório" foi removido daqui pois agora ele está dentro da ConversationHandler.
-    application.add_handler(MessageHandler(filters.Regex('^📊 Relatório$'), iniciar_relatorio))
+    # 3. Adiciona os botões que NÃO iniciam conversas.
+    # A linha do 'Relatório' foi REMOVIDA daqui, pois já está na ConversationHandler.
     application.add_handler(MessageHandler(filters.Regex('^🗂️ Categorias$'), list_categorias))
     application.add_handler(MessageHandler(filters.Regex('^💳 Cartões$'), menu_cartoes))
     application.add_handler(MessageHandler(filters.Regex('^💡 Ajuda$'), ajuda))
@@ -561,15 +563,15 @@ def main():
     application.add_handler(MessageHandler(filters.Regex('^⬇️ Exportar$'), exportar_csv))
     application.add_handler(MessageHandler(filters.Regex('^🏠 Menu Principal$'), start))
     
-    # --- Outros Handlers ---
+    # 4. Outros handlers.
     application.add_handler(CallbackQueryHandler(desfazer_lancamento, pattern="^undo:"))
     
-    # --- Handler de Fallback (Último Recurso) ---
+    # 5. Handler de fallback, sempre por último.
     async def fallback_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Não entendi. Para registar uma transação, use o formato `-valor categoria` ou `+valor categoria`.")
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_text))
 
-    print("Bot v12.1 (Correção de Relatório) iniciado!")
+    print("Bot v12.2 (Estrutura de Handlers Corrigida) iniciado!")
     application.run_polling()
 
 if __name__ == '__main__':
