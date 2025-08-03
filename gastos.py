@@ -518,7 +518,7 @@ def main():
         fallbacks=[CommandHandler('cancelar', cancelar_conversa)]
     )
     relatorio_conv = ConversationHandler(
-        entry_points=[CommandHandler('relatorio', iniciar_relatorio), MessageHandler(filters.Regex('^📊 Relatório$'), iniciar_relatorio)],
+        entry_points=[CommandHandler('relatorio', iniciar_relatorio)],
         states={
             ESCOLHER_PERIODO: [CallbackQueryHandler(processar_escolha_periodo, pattern="^rel_")],
             AGUARDANDO_DATA_INICIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_inicio)],
@@ -546,6 +546,7 @@ def main():
     application.add_handler(CommandHandler("cancelar_agendamento", cancelar_agendamento))
 
     # Handlers de Botões Permanentes
+    application.add_handler(MessageHandler(filters.Regex('^📊 Relatório$'), iniciar_relatorio))
     application.add_handler(MessageHandler(filters.Regex('^🗂️ Categorias$'), list_categorias))
     application.add_handler(MessageHandler(filters.Regex('^💳 Cartões$'), menu_cartoes))
     application.add_handler(MessageHandler(filters.Regex('^💡 Ajuda$'), ajuda))
