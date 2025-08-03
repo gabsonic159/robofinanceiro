@@ -40,8 +40,10 @@ def inicializar_db():
     # Tabelas para Lembretes e Agendamentos
     cursor.execute('CREATE TABLE IF NOT EXISTS lembretes_diarios (id_usuario INTEGER PRIMARY KEY, horario TEXT, chat_id INTEGER, FOREIGN KEY (id_usuario) REFERENCES usuarios(id))')
     cursor.execute('CREATE TABLE IF NOT EXISTS agendamentos (id INTEGER PRIMARY KEY AUTOINCREMENT, id_usuario INTEGER, dia INTEGER, horario TEXT, titulo TEXT, valor REAL, chat_id INTEGER, UNIQUE(id_usuario, titulo), FOREIGN KEY (id_usuario) REFERENCES usuarios(id))')
-    # Tabela de orçamentos
+    
+    # ### MUDANÇA ###: Nova tabela para orçamentos
     cursor.execute('CREATE TABLE IF NOT EXISTS orcamentos (id INTEGER PRIMARY KEY AUTOINCREMENT, id_usuario INTEGER, id_categoria INTEGER, valor REAL, UNIQUE(id_usuario, id_categoria), FOREIGN KEY (id_usuario) REFERENCES usuarios(id), FOREIGN KEY (id_categoria) REFERENCES categorias(id))')
+    
     conn.commit()
     conn.close()
 
@@ -61,6 +63,7 @@ def gerar_grafico_pizza(gastos_por_categoria):
 
 # --- Comandos Principais ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Envia uma mensagem de boas-vindas e o menu principal."""
     user = update.message.from_user
     telegram_id = user.id
     user_id_local = get_user_id(telegram_id)
@@ -71,7 +74,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ["⏰ Lembretes/Agendamentos", "⬇️ Exportar"],
         ["🏠 Menu Principal"]
     ]
-    markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True, one_time_keyboard=False)
+    markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
 
     if not user_id_local:
         data_criacao_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
@@ -84,22 +87,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         welcome_text = (
             f"Olá, {user.first_name}! 👋 Seja muito bem-vindo(a) ao seu novo Assistente Financeiro.\n\n"
+            "Estou aqui para te ajudar a ter um controle total sobre suas finanças de forma simples e rápida.\n\n"
             "Para começar, é muito fácil:\n"
-            "➡️ **Registre um gasto:** `-50 Mercado`\n"
-            "➡️ **Registre uma receita:** `+1000 Salário`\n\n"
-            "Use os botões abaixo para explorar todas as funcionalidades."
+            "➡️ **Registre um gasto:** `-50 mercado`\n"
+            "➡️ **Registre uma receita:** `+1000 salário`\n\n"
+            "Use os botões abaixo para explorar todas as funcionalidades. Qualquer dúvida, clique em '💡 Ajuda'."
         )
         await update.message.reply_text(welcome_text, reply_markup=markup)
     else:
         welcome_back_text = f"Olá de volta, {user.first_name}! O que vamos organizar hoje?"
         await update.message.reply_text(welcome_back_text, reply_markup=markup)
 
+# ### MUDANÇA ###: Menu de ajuda atualizado
 async def ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto_ajuda = (
         "🤖 *Comandos e Funções*\n\n"
-        "Para registrar uma transação:\n"
-        "`-valor categoria` (gastos)\n"
-        "`+valor categoria` (receitas)\n\n"
+        "Para registrar uma transação, basta enviar uma mensagem no formato:\n"
+        "`-valor categoria` (para gastos)\n"
+        "`+valor categoria` (para receitas)\n\n"
         "💰 *Orçamentos:*\n"
         "  `/orcamento <categoria> <valor>`\n"
         "  `/meus_orcamentos`\n"
@@ -110,7 +115,7 @@ async def ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  `/fatura <nome_cartao>`\n"
         "  `/del_cartao <nome>`\n\n"
         "⏰ *Lembretes e Agendamentos:*\n"
-        "  `/lembrete <HH:MM>`\n"
+        "  `/lembrete <HH:MM>` (Lembrete diário)\n"
         "  `/agendar <dia> <HH:MM> [valor] <título>`\n\n"
         "📊 *Análise e Exportação:*\n"
         "  `/relatorio`\n"
@@ -119,6 +124,7 @@ async def ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(texto_ajuda, parse_mode='Markdown')
 
 # --- Módulo de Orçamentos ---
+# ### MUDANÇA ###: Novas funções para gerenciar orçamentos
 async def set_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = get_user_id(update.message.from_user.id)
     try:
@@ -131,6 +137,7 @@ async def set_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
+        # Procura a categoria. Se não existir, cria.
         cursor.execute("SELECT id FROM categorias WHERE id_usuario = ? AND nome = ?", (user_id, nome_categoria))
         categoria = cursor.fetchone()
         if not categoria:
@@ -140,6 +147,7 @@ async def set_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             categoria_id = categoria[0]
             
+        # Insere ou atualiza o orçamento
         cursor.execute("REPLACE INTO orcamentos (id_usuario, id_categoria, valor) VALUES (?, ?, ?)", (user_id, categoria_id, valor))
         conn.commit()
         conn.close()
@@ -154,6 +162,7 @@ async def list_orcamentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
+    # Busca os orçamentos e os gastos do mês atual para cada um
     agora_utc = datetime.now(timezone.utc)
     inicio_mes_str = agora_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
 
@@ -194,6 +203,7 @@ async def del_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
 
+        # Encontrar o ID da categoria para poder deletar o orçamento
         cursor.execute("SELECT id FROM categorias WHERE id_usuario = ? AND nome = ?", (user_id, nome_categoria))
         categoria = cursor.fetchone()
         
@@ -216,9 +226,10 @@ async def del_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except (IndexError, ValueError):
         await update.message.reply_text("Formato inválido! Use: `/del_orcamento <categoria>`")
 
-# --- Módulo de Gestão de Cartões ---
-# ... (todas as suas funções de cartões, categorias, relatórios, etc., continuam aqui inalteradas)
-# ...
+# ... (o resto do seu código permanece o mesmo até a função registrar_transacao_final) ...
+# Copie e cole todo o restante do seu código aqui, e substitua a função registrar_transacao_final pela abaixo
+
+# --- Módulo de Lembretes e Agendamentos ---
 async def menu_lembretes_e_agendamentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = ("Aqui pode configurar suas notificações:\n\n"
              "☀️ *LEMBRETE DIÁRIO* (para registar gastos)\n"
@@ -230,6 +241,9 @@ async def menu_lembretes_e_agendamentos(update: Update, context: ContextTypes.DE
              "`/cancelar_agendamento <título>`")
     await update.message.reply_text(texto, parse_mode='Markdown')
 
+# (As funções de lembrete e agendamento estão mais abaixo, em "Tarefas Agendadas")
+
+# --- Módulo de Gestão de Cartões ---
 async def menu_cartoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = ("Aqui pode gerir os seus cartões de crédito:\n\n"
              "➡️ Para adicionar:\n"
@@ -303,6 +317,7 @@ async def del_cartao(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cartao_id = cartao[0]; cursor.execute("UPDATE transacoes SET id_cartao = NULL WHERE id_cartao = ?", (cartao_id,)); cursor.execute("DELETE FROM cartoes WHERE id = ?", (cartao_id,)); conn.commit(); conn.close()
     await update.message.reply_text(f"✅ Cartão '{nome_cartao}' removido.")
 
+# --- Módulo de Categorias ---
 async def list_categorias(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = get_user_id(update.message.from_user.id); conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT nome FROM categorias WHERE id_usuario = ? ORDER BY nome", (user_id,)); categorias = cursor.fetchall(); conn.close()
@@ -320,6 +335,7 @@ async def del_categoria(update: Update, context: ContextTypes.DEFAULT_TYPE):
     categoria_id = categoria[0]; cursor.execute("UPDATE transacoes SET id_categoria = NULL WHERE id_categoria = ?", (categoria_id,)); cursor.execute("DELETE FROM categorias WHERE id = ?", (categoria_id,)); conn.commit(); conn.close()
     await update.message.reply_text(f"✅ Categoria '{nome_categoria}' apagada.")
 
+# --- Módulo de Relatórios e Análise ---
 ESCOLHER_PERIODO, AGUARDANDO_DATA_INICIO, AGUARDANDO_DATA_FIM = range(3)
 async def iniciar_relatorio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("Mês Atual", callback_data="rel_mes_atual")], [InlineKeyboardButton("Mês Anterior", callback_data="rel_mes_anterior")], [InlineKeyboardButton("Período Específico", callback_data="rel_periodo_especifico")]]
@@ -372,6 +388,7 @@ async def cancelar_conversa(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if key in context.user_data: del context.user_data[key]
     await update.message.reply_text("Operação cancelada."); return ConversationHandler.END
 
+# --- Módulo de Exportação ---
 async def exportar_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = get_user_id(update.message.from_user.id); agora_utc = datetime.now(timezone.utc); inicio_mes_utc_str = agora_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d %H:%M:%S'); conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT t.data_transacao, t.tipo, t.valor, c.nome as cat_nome, cart.nome as cart_nome FROM transacoes t LEFT JOIN categorias c ON t.id_categoria = c.id LEFT JOIN cartoes cart ON t.id_cartao = cart.id WHERE t.id_usuario = ? AND t.data_transacao >= ? ORDER BY t.data_transacao ASC", (user_id, inicio_mes_utc_str)); transacoes = cursor.fetchall(); conn.close()
@@ -383,7 +400,8 @@ async def exportar_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     output.seek(0); data_bytes = output.getvalue().encode('utf-8'); mes_ano = agora_utc.strftime('%Y_%m'); file_name = f"relatorio_{mes_ano}.csv"
     await context.bot.send_document(chat_id=update.effective_chat.id, document=data_bytes, filename=file_name, caption="Aqui está o seu relatório de transações do mês.")
 
-AGUARDANDO_PAGAMENTO, AGUARDANDO_SUGESTAO_CATEGORIA = range(10, 12) 
+# --- Módulo de Transações (com Conversa e Inteligência) ---
+AGUARDANDO_PAGAMENTO, AGUARDANDO_SUGESTAO_CATEGORIA = range(10, 12) # Usa números diferentes para não colidir
 async def iniciar_processo_transacao(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text
     padrao = re.compile(r'^([+\-])\s*(\d+(?:[.,]\d{1,2})?)\s*(.*)$'); match = padrao.match(texto)
@@ -392,21 +410,24 @@ async def iniciar_processo_transacao(update: Update, context: ContextTypes.DEFAU
     if not nome_categoria: await update.message.reply_text("Adicione uma categoria. Ex: `-50 mercado`"); return ConversationHandler.END
     user_id = get_user_id(update.message.from_user.id)
     
+    # Verifica se a categoria existe
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT id FROM categorias WHERE id_usuario = ? AND nome = ?", (user_id, nome_categoria)); categoria = cursor.fetchone()
     
+    # Se a categoria NÃO existe, inicia a sugestão
     if not categoria:
         cursor.execute("SELECT nome FROM categorias WHERE id_usuario = ?", (user_id,)); todas_categorias = [cat[0] for cat in cursor.fetchall()]
         conn.close()
         if todas_categorias:
             melhor_sugestao, score = process.extractOne(nome_categoria, todas_categorias, scorer=fuzz.token_sort_ratio)
-            if score > 70: 
+            if score > 70: # Limiar de confiança para a sugestão
                 context.user_data['sugestao_categoria'] = {'sinal': sinal, 'valor_str': valor_str, 'categoria_errada': nome_categoria, 'sugestao': melhor_sugestao}
                 keyboard = [[InlineKeyboardButton(f"Sim, usar '{melhor_sugestao.capitalize()}'", callback_data=f"sugestao_sim"), InlineKeyboardButton("Não, criar nova", callback_data=f"sugestao_nao")]]
                 await update.message.reply_text(f"Hmm, não encontrei a categoria '{nome_categoria}'. Quis dizer '{melhor_sugestao.capitalize()}'?", reply_markup=InlineKeyboardMarkup(keyboard))
                 return AGUARDANDO_SUGESTAO_CATEGORIA
     conn.close()
 
+    # Se a categoria existe ou não há sugestão, continua o fluxo normal
     context.user_data['transacao_pendente'] = {'sinal': sinal, 'valor_str': valor_str, 'nome_categoria': nome_categoria}
     if sinal == '+':
         await registrar_transacao_final(update, context, user_id, nome_categoria, sinal, valor_str)
@@ -428,9 +449,10 @@ async def tratar_sugestao_categoria(update: Update, context: ContextTypes.DEFAUL
     
     if query.data == 'sugestao_sim':
         nome_categoria_correta = dados_sugestao['sugestao']
-    else: 
+    else: # sugestao_nao
         nome_categoria_correta = dados_sugestao['categoria_errada']
 
+    # Continua o fluxo de registo com a categoria (corrigida ou nova)
     await query.edit_message_text(f"Ok, a usar a categoria '{nome_categoria_correta.capitalize()}'...")
     
     user_id = get_user_id(update.effective_user.id)
@@ -459,9 +481,11 @@ async def receber_forma_pagamento(update: Update, context: ContextTypes.DEFAULT_
     await registrar_transacao_final(update, context, user_id, dados_transacao['nome_categoria'], dados_transacao['sinal'], dados_transacao['valor_str'], id_cartao=id_cartao)
     return ConversationHandler.END
 
+# ### MUDANÇA ###: Função de registro de transação agora verifica o orçamento
 async def registrar_transacao_final(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id, nome_categoria, sinal, valor_str, id_cartao=None, is_scheduled=False):
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     
+    # Garante que a categoria existe e pega o ID
     cursor.execute("SELECT id FROM categorias WHERE id_usuario = ? AND nome = ?", (user_id, nome_categoria)); categoria = cursor.fetchone()
     if not categoria: 
         cursor.execute("INSERT INTO categorias (id_usuario, nome) VALUES (?, ?)", (user_id, nome_categoria)); conn.commit()
@@ -473,9 +497,11 @@ async def registrar_transacao_final(update: Update, context: ContextTypes.DEFAUL
     valor = float(valor_str.replace(',', '.'))
     data_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     
+    # Insere a transação
     cursor.execute("INSERT INTO transacoes (id_usuario, id_categoria, valor, tipo, data_transacao, id_cartao) VALUES (?, ?, ?, ?, ?, ?)", (user_id, categoria_id, valor, tipo, data_str, id_cartao))
     new_transaction_id = cursor.lastrowid
     
+    # Gamificação da sequência
     mensagem_sequencia = ""
     if not is_scheduled:
         hoje_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
@@ -488,6 +514,7 @@ async def registrar_transacao_final(update: Update, context: ContextTypes.DEFAUL
             mensagem_sequencia = f"\n\n🔥 Sequência de {nova_sequencia} dias!" if nova_sequencia > 1 else "\n\n💪 Nova sequência iniciada!"
             cursor.execute("UPDATE usuarios SET ultimo_lancamento = ?, dias_sequencia = ? WHERE id = ?", (hoje_str, nova_sequencia, user_id))
     
+    # Verificação do orçamento
     mensagem_orcamento = ""
     if tipo == 'saida':
         cursor.execute("SELECT valor FROM orcamentos WHERE id_usuario = ? AND id_categoria = ?", (user_id, categoria_id))
@@ -537,6 +564,7 @@ async def desfazer_lancamento(update: Update, context: ContextTypes.DEFAULT_TYPE
     else: cursor.execute("DELETE FROM transacoes WHERE id = ?", (transaction_id,)); conn.commit(); await query.edit_message_text("✅ Lançamento desfeito!")
     conn.close()
 
+# --- Módulo de Tarefas Agendadas ---
 async def definir_lembrete_diario(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id; user_id = get_user_id(update.message.from_user.id)
     try:
@@ -623,11 +651,8 @@ def main():
     
     carregar_tarefas_agendadas(application)
 
-    # ### ESTRUTURA DE HANDLERS DEFINITIVA ###
-    # Usaremos grupos para definir a prioridade. Menor número = maior prioridade.
-
-    # --- Definição das Conversas ---
-    # Apenas definimos as conversas aqui. Elas serão adicionadas nos grupos abaixo.
+    # --- Handlers de Conversa ---
+    # As conversas devem ser adicionadas ANTES dos handlers mais genéricos para terem prioridade.
     transacao_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(r'^[+\-]\s*(\d+(?:[.,]\d{1,2})?)\s*(.*)'), iniciar_processo_transacao)],
         states={
@@ -638,9 +663,11 @@ def main():
     )
 
     relatorio_conv = ConversationHandler(
-        # A conversa de relatório só precisa ser iniciada pelo comando,
-        # pois o botão terá um handler próprio de alta prioridade.
-        entry_points=[CommandHandler('relatorio', iniciar_relatorio)],
+        entry_points=[
+            CommandHandler('relatorio', iniciar_relatorio),
+            # ### MUDANÇA AQUI ###: Trocando Regex por Text para uma comparação exata.
+            MessageHandler(filters.Text('📊 Relatório'), iniciar_relatorio)
+        ],
         states={
             ESCOLHER_PERIODO: [CallbackQueryHandler(processar_escolha_periodo, pattern="^rel_")],
             AGUARDANDO_DATA_INICIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_inicio)],
@@ -648,52 +675,50 @@ def main():
         },
         fallbacks=[CommandHandler('cancelar', cancelar_conversa)],
     )
+    # Adiciona as conversas ao aplicativo PRIMEIRO
+    #application.add_handler(transacao_conv)
+    application.add_handler(relatorio_conv)
 
-    # --- GRUPO 0: Handlers de Comandos (Prioridade Máxima) ---
-    # Comandos explícitos que o usuário digita.
-    application.add_handler(CommandHandler("start", start), group=0)
-    application.add_handler(CommandHandler("ajuda", ajuda), group=0)
-    application.add_handler(CommandHandler("listarcategorias", list_categorias), group=0)
-    application.add_handler(CommandHandler("del_categoria", del_categoria), group=0)
-    application.add_handler(CommandHandler("exportar", exportar_csv), group=0)
-    application.add_handler(CommandHandler("add_cartao", add_cartao), group=0)
-    application.add_handler(CommandHandler("list_cartoes", list_cartoes), group=0)
-    application.add_handler(CommandHandler("del_cartao", del_cartao), group=0)
-    application.add_handler(CommandHandler("fatura", fatura), group=0)
-    application.add_handler(CommandHandler("lembrete", definir_lembrete_diario), group=0)
-    application.add_handler(CommandHandler("cancelar_lembrete", cancelar_lembrete_diario), group=0)
-    application.add_handler(CommandHandler("agendar", agendar_conta), group=0)
-    application.add_handler(CommandHandler("ver_agendamentos", ver_agendamentos), group=0)
-    application.add_handler(CommandHandler("cancelar_agendamento", cancelar_agendamento), group=0)
-    application.add_handler(CommandHandler("orcamento", set_orcamento), group=0)
-    application.add_handler(CommandHandler("meus_orcamentos", list_orcamentos), group=0)
-    application.add_handler(CommandHandler("del_orcamento", del_orcamento), group=0)
+    # --- Handlers de Comandos Normais ---
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("ajuda", ajuda))
+    application.add_handler(CommandHandler("listarcategorias", list_categorias))
+    application.add_handler(CommandHandler("del_categoria", del_categoria))
+    application.add_handler(CommandHandler("exportar", exportar_csv))
+    application.add_handler(CommandHandler("add_cartao", add_cartao))
+    application.add_handler(CommandHandler("list_cartoes", list_cartoes))
+    application.add_handler(CommandHandler("del_cartao", del_cartao))
+    application.add_handler(CommandHandler("fatura", fatura))
+    application.add_handler(CommandHandler("lembrete", definir_lembrete_diario))
+    application.add_handler(CommandHandler("cancelar_lembrete", cancelar_lembrete_diario))
+    application.add_handler(CommandHandler("agendar", agendar_conta))
+    application.add_handler(CommandHandler("ver_agendamentos", ver_agendamentos))
+    application.add_handler(CommandHandler("cancelar_agendamento", cancelar_agendamento))
+    application.add_handler(CommandHandler("orcamento", set_orcamento))
+    application.add_handler(CommandHandler("meus_orcamentos", list_orcamentos))
+    application.add_handler(CommandHandler("del_orcamento", del_orcamento))
 
-    # --- GRUPO 1: Handlers de Botões e Conversas (Prioridade Intermediária) ---
-    # Primeiro, os botões específicos que iniciam conversas.
-    application.add_handler(MessageHandler(filters.Text('📊 Relatório'), iniciar_relatorio), group=1)
+    # --- Handlers de Botões Permanentes (que não iniciam conversas) ---
+    application.add_handler(MessageHandler(filters.Regex('^🗂️ Categorias$'), list_categorias))
+    application.add_handler(MessageHandler(filters.Regex('^💳 Cartões$'), menu_cartoes))
+    application.add_handler(MessageHandler(filters.Regex('^💡 Ajuda$'), ajuda))
+    application.add_handler(MessageHandler(filters.Regex('^⏰ Lembretes/Agendamentos$'), menu_lembretes_e_agendamentos))
+    application.add_handler(MessageHandler(filters.Regex('^⬇️ Exportar$'), exportar_csv))
+    application.add_handler(MessageHandler(filters.Regex('^🏠 Menu Principal$'), start))
     
-    # Adicionamos as conversas. O entry point do relatório (botão) já foi pego acima.
-    application.add_handler(relatorio_conv, group=1)
-    application.add_handler(transacao_conv, group=1)
+    # --- Outros Handlers ---
+    application.add_handler(CallbackQueryHandler(desfazer_lancamento, pattern="^undo:"))
     
-    # Agora, os botões que NÃO iniciam conversas.
-    application.add_handler(MessageHandler(filters.Text('🗂️ Categorias'), list_categorias), group=1)
-    application.add_handler(MessageHandler(filters.Text('💳 Cartões'), menu_cartoes), group=1)
-    application.add_handler(MessageHandler(filters.Text('💡 Ajuda'), ajuda), group=1)
-    application.add_handler(MessageHandler(filters.Text('⏰ Lembretes/Agendamentos'), menu_lembretes_e_agendamentos), group=1)
-    application.add_handler(MessageHandler(filters.Text('⬇️ Exportar'), exportar_csv), group=1)
-    application.add_handler(MessageHandler(filters.Text('🏠 Menu Principal'), start), group=1)
-    
-    # --- GRUPO 2: Outros Handlers (Prioridade Baixa) ---
-    application.add_handler(CallbackQueryHandler(desfazer_lancamento, pattern="^undo:"), group=2)
-    
-    # --- GRUPO 3: Handler de Fallback (Última Prioridade) ---
+    # --- Handler de Fallback ---
+    # ### CORREÇÃO ###: A definição da função estava faltando. Adicionada de volta.
     async def fallback_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Não entendi. Para registar uma transação, use o formato `-valor categoria` ou `+valor categoria`.")
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_text), group=3)
+    
+    # Este deve ser o ÚLTIMO handler de mensagem de texto.
+    fallback_handler = MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_text)
+    application.add_handler(fallback_handler)
 
-    print("Bot v15.0 (Estrutura de Prioridades Definitiva) iniciado!")
+    print("Bot v13.2 (Correção Final de Handlers) iniciado!")
     application.run_polling()
 
 if __name__ == '__main__':
