@@ -665,7 +665,8 @@ def main():
     relatorio_conv = ConversationHandler(
         entry_points=[
             CommandHandler('relatorio', iniciar_relatorio),
-            MessageHandler(filters.Regex('^📊 Relatório$'), iniciar_relatorio)
+            # ### MUDANÇA AQUI ###: Trocando Regex por Text para uma comparação exata.
+            MessageHandler(filters.Text('📊 Relatório'), iniciar_relatorio)
         ],
         states={
             ESCOLHER_PERIODO: [CallbackQueryHandler(processar_escolha_periodo, pattern="^rel_")],
@@ -674,7 +675,6 @@ def main():
         },
         fallbacks=[CommandHandler('cancelar', cancelar_conversa)],
     )
-
     # Adiciona as conversas ao aplicativo PRIMEIRO
     application.add_handler(transacao_conv)
     application.add_handler(relatorio_conv)
