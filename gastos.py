@@ -651,7 +651,8 @@ def main():
     
     carregar_tarefas_agendadas(application)
 
-    # Handlers de Conversa
+    # --- Handlers de Conversa ---
+    # As conversas devem ser adicionadas ANTES dos handlers mais genéricos para terem prioridade.
     transacao_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(r'^[+\-]\s*(\d+(?:[.,]\d{1,2})?)\s*(.*)'), iniciar_processo_transacao)],
         states={
@@ -660,21 +661,28 @@ def main():
         },
         fallbacks=[CommandHandler('cancelar', cancelar_conversa)]
     )
+
     relatorio_conv = ConversationHandler(
-        entry_points=[CommandHandler('relatorio', iniciar_relatorio),
-        MessageHandler(filters.Regex('^📊 Relatório$'), iniciar_relatorio)
+        # ESTA É A FORMA CORRETA: A conversa é iniciada por um comando OU pelo texto exato do botão.
+        entry_points=[
+            CommandHandler('relatorio', iniciar_relatorio),
+            MessageHandler(filters.Regex('^📊 Relatório$'), iniciar_relatorio)
         ],
         states={
+            # Uma vez dentro da conversa, o bot espera por um clique nos botões inline.
             ESCOLHER_PERIODO: [CallbackQueryHandler(processar_escolha_periodo, pattern="^rel_")],
             AGUARDANDO_DATA_INICIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_inicio)],
             AGUARDANDO_DATA_FIM: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_fim)],
         },
         fallbacks=[CommandHandler('cancelar', cancelar_conversa)],
     )
+
+    # Adiciona as conversas ao aplicativo PRIMEIRO
     application.add_handler(transacao_conv)
     application.add_handler(relatorio_conv)
 
-    # Handlers de Comandos Normais
+    # --- Handlers de Comandos Normais ---
+    # Adicionados depois das conversas.
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("ajuda", ajuda))
     application.add_handler(CommandHandler("listarcategorias", list_categorias))
@@ -689,14 +697,11 @@ def main():
     application.add_handler(CommandHandler("agendar", agendar_conta))
     application.add_handler(CommandHandler("ver_agendamentos", ver_agendamentos))
     application.add_handler(CommandHandler("cancelar_agendamento", cancelar_agendamento))
-    
-    # ### MUDANÇA ###: Novos handlers para os comandos de orçamento
     application.add_handler(CommandHandler("orcamento", set_orcamento))
     application.add_handler(CommandHandler("meus_orcamentos", list_orcamentos))
     application.add_handler(CommandHandler("del_orcamento", del_orcamento))
 
-    # Handlers de Botões Permanentes
-    
+    # --- Handlers de Botões Permanentes (que não iniciam conversas) ---
     application.add_handler(MessageHandler(filters.Regex('^🗂️ Categorias$'), list_categorias))
     application.add_handler(MessageHandler(filters.Regex('^💳 Cartões$'), menu_cartoes))
     application.add_handler(MessageHandler(filters.Regex('^💡 Ajuda$'), ajuda))
@@ -704,13 +709,15 @@ def main():
     application.add_handler(MessageHandler(filters.Regex('^⬇️ Exportar$'), exportar_csv))
     application.add_handler(MessageHandler(filters.Regex('^🏠 Menu Principal$'), start))
     
+    # --- Outros Handlers ---
     application.add_handler(CallbackQueryHandler(desfazer_lancamento, pattern="^undo:"))
     
-    async def fallback_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("Não entendi. Para registar uma transação, use o formato `-valor categoria` ou `+valor categoria`.")
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_text))
+    # --- Handler de Fallback ---
+    # Este deve ser o ÚLTIMO handler de mensagem de texto para capturar o que não foi entendido.
+    fallback_handler = MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_text)
+    application.add_handler(fallback_handler)
 
-    print("Bot v13.0 (Orçamentos) iniciado!")
+    print("Bot v13.1 (Correção de Relatório) iniciado!")
     application.run_polling()
 
 if __name__ == '__main__':
