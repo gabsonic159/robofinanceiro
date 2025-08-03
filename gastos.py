@@ -23,8 +23,14 @@ from telegram.ext import (
 )
 
 # --- Configuração da Base de Dados ---
+# No início do arquivo
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(SCRIPT_DIR, "gastos_bot.db")
+DATA_DIR = os.getenv("RENDER_DISK_MOUNT_PATH", SCRIPT_DIR) 
+DB_PATH = os.path.join(DATA_DIR, "gastos_bot.db")
+
+# Garante que o diretório de dados exista
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR)
 
 def inicializar_db():
     conn = sqlite3.connect(DB_PATH)
@@ -458,7 +464,12 @@ def carregar_tarefas_agendadas(application: Application):
 
 def main():
     inicializar_db()
-    # TOKEN = "8171923848:AAGfYmKIQmyGMY5i4xjn6p8HXyNzKYgVEks" # Insira seu token aqui
+    # TOKEN = "8171923848:AAGfYmKIQmyGMY5i4xjn6p8HXyNzKYgVEks" # Insira seu token aqui# ↓↓↓ ADICIONE OU CORRIJA ESTA PARTE ↓↓↓
+    TOKEN = os.getenv("TELEGRAM_TOKEN")
+    if not TOKEN:
+        print("ERRO: A variável de ambiente TELEGRAM_TOKEN não foi definida no Render.")
+        return # Isso para o script se não encontrar o token
+    # ↑↑↑ FIM DA CORREÇÃO ↑↑↑
     application = Application.builder().token(TOKEN).build()
     
     carregar_tarefas_agendadas(application)
