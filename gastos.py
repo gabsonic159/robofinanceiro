@@ -623,42 +623,11 @@ def main():
     
     carregar_tarefas_agendadas(application)
 
-    # --- Handlers de Comandos Normais (Prioridade 1) ---
-    # Comandos explícitos como /start, /ajuda, etc.
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("ajuda", ajuda))
-    application.add_handler(CommandHandler("listarcategorias", list_categorias))
-    application.add_handler(CommandHandler("del_categoria", del_categoria))
-    application.add_handler(CommandHandler("exportar", exportar_csv))
-    application.add_handler(CommandHandler("add_cartao", add_cartao))
-    application.add_handler(CommandHandler("list_cartoes", list_cartoes))
-    application.add_handler(CommandHandler("del_cartao", del_cartao))
-    application.add_handler(CommandHandler("fatura", fatura))
-    application.add_handler(CommandHandler("lembrete", definir_lembrete_diario))
-    application.add_handler(CommandHandler("cancelar_lembrete", cancelar_lembrete_diario))
-    application.add_handler(CommandHandler("agendar", agendar_conta))
-    application.add_handler(CommandHandler("ver_agendamentos", ver_agendamentos))
-    application.add_handler(CommandHandler("cancelar_agendamento", cancelar_agendamento))
-    application.add_handler(CommandHandler("orcamento", set_orcamento))
-    application.add_handler(CommandHandler("meus_orcamentos", list_orcamentos))
-    application.add_handler(CommandHandler("del_orcamento", del_orcamento))
+    # ### ESTRUTURA DE HANDLERS DEFINITIVA ###
+    # Usaremos grupos para definir a prioridade. Menor número = maior prioridade.
 
-    # --- Handlers de Conversa (Prioridade 2) ---
-    # As conversas são o próximo nível de prioridade.
-    relatorio_conv = ConversationHandler(
-        entry_points=[
-            CommandHandler('relatorio', iniciar_relatorio),
-            MessageHandler(filters.Regex('^📊 Relatório$'), iniciar_relatorio)
-        ],
-        states={
-            ESCOLHER_PERIODO: [CallbackQueryHandler(processar_escolha_periodo, pattern="^rel_")],
-            AGUARDANDO_DATA_INICIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_inicio)],
-            AGUARDANDO_DATA_FIM: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_fim)],
-        },
-        fallbacks=[CommandHandler('cancelar', cancelar_conversa)],
-    )
-    application.add_handler(relatorio_conv) # Adiciona a conversa de relatório
-
+    # --- Definição das Conversas ---
+    # Apenas definimos as conversas aqui. Elas serão adicionadas nos grupos abaixo.
     transacao_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(r'^[+\-]\s*(\d+(?:[.,]\d{1,2})?)\s*(.*)'), iniciar_processo_transacao)],
         states={
@@ -667,27 +636,64 @@ def main():
         },
         fallbacks=[CommandHandler('cancelar', cancelar_conversa)]
     )
-    application.add_handler(transacao_conv) # Adiciona a conversa de transação DEPOIS
 
-    # --- Handlers de Botões Permanentes (Prioridade 3) ---
-    # Estes são os botões que não iniciam conversas.
-    application.add_handler(MessageHandler(filters.Regex('^🗂️ Categorias$'), list_categorias))
-    application.add_handler(MessageHandler(filters.Regex('^💳 Cartões$'), menu_cartoes))
-    application.add_handler(MessageHandler(filters.Regex('^💡 Ajuda$'), ajuda))
-    application.add_handler(MessageHandler(filters.Regex('^⏰ Lembretes/Agendamentos$'), menu_lembretes_e_agendamentos))
-    application.add_handler(MessageHandler(filters.Regex('^⬇️ Exportar$'), exportar_csv))
-    application.add_handler(MessageHandler(filters.Regex('^🏠 Menu Principal$'), start))
+    relatorio_conv = ConversationHandler(
+        # A conversa de relatório só precisa ser iniciada pelo comando,
+        # pois o botão terá um handler próprio de alta prioridade.
+        entry_points=[CommandHandler('relatorio', iniciar_relatorio)],
+        states={
+            ESCOLHER_PERIODO: [CallbackQueryHandler(processar_escolha_periodo, pattern="^rel_")],
+            AGUARDANDO_DATA_INICIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_inicio)],
+            AGUARDANDO_DATA_FIM: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_fim)],
+        },
+        fallbacks=[CommandHandler('cancelar', cancelar_conversa)],
+    )
+
+    # --- GRUPO 0: Handlers de Comandos (Prioridade Máxima) ---
+    # Comandos explícitos que o usuário digita.
+    application.add_handler(CommandHandler("start", start), group=0)
+    application.add_handler(CommandHandler("ajuda", ajuda), group=0)
+    application.add_handler(CommandHandler("listarcategorias", list_categorias), group=0)
+    application.add_handler(CommandHandler("del_categoria", del_categoria), group=0)
+    application.add_handler(CommandHandler("exportar", exportar_csv), group=0)
+    application.add_handler(CommandHandler("add_cartao", add_cartao), group=0)
+    application.add_handler(CommandHandler("list_cartoes", list_cartoes), group=0)
+    application.add_handler(CommandHandler("del_cartao", del_cartao), group=0)
+    application.add_handler(CommandHandler("fatura", fatura), group=0)
+    application.add_handler(CommandHandler("lembrete", definir_lembrete_diario), group=0)
+    application.add_handler(CommandHandler("cancelar_lembrete", cancelar_lembrete_diario), group=0)
+    application.add_handler(CommandHandler("agendar", agendar_conta), group=0)
+    application.add_handler(CommandHandler("ver_agendamentos", ver_agendamentos), group=0)
+    application.add_handler(CommandHandler("cancelar_agendamento", cancelar_agendamento), group=0)
+    application.add_handler(CommandHandler("orcamento", set_orcamento), group=0)
+    application.add_handler(CommandHandler("meus_orcamentos", list_orcamentos), group=0)
+    application.add_handler(CommandHandler("del_orcamento", del_orcamento), group=0)
+
+    # --- GRUPO 1: Handlers de Botões e Conversas (Prioridade Intermediária) ---
+    # Primeiro, os botões específicos que iniciam conversas.
+    application.add_handler(MessageHandler(filters.Text('📊 Relatório'), iniciar_relatorio), group=1)
     
-    # --- Outros Handlers ---
-    application.add_handler(CallbackQueryHandler(desfazer_lancamento, pattern="^undo:"))
+    # Adicionamos as conversas. O entry point do relatório (botão) já foi pego acima.
+    application.add_handler(relatorio_conv, group=1)
+    application.add_handler(transacao_conv, group=1)
     
-    # --- Handler de Fallback (Última Prioridade) ---
-    # Este handler só será acionado se NENHUM dos handlers acima corresponder.
+    # Agora, os botões que NÃO iniciam conversas.
+    application.add_handler(MessageHandler(filters.Text('🗂️ Categorias'), list_categorias), group=1)
+    application.add_handler(MessageHandler(filters.Text('💳 Cartões'), menu_cartoes), group=1)
+    application.add_handler(MessageHandler(filters.Text('💡 Ajuda'), ajuda), group=1)
+    application.add_handler(MessageHandler(filters.Text('⏰ Lembretes/Agendamentos'), menu_lembretes_e_agendamentos), group=1)
+    application.add_handler(MessageHandler(filters.Text('⬇️ Exportar'), exportar_csv), group=1)
+    application.add_handler(MessageHandler(filters.Text('🏠 Menu Principal'), start), group=1)
+    
+    # --- GRUPO 2: Outros Handlers (Prioridade Baixa) ---
+    application.add_handler(CallbackQueryHandler(desfazer_lancamento, pattern="^undo:"), group=2)
+    
+    # --- GRUPO 3: Handler de Fallback (Última Prioridade) ---
     async def fallback_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Não entendi. Para registar uma transação, use o formato `-valor categoria` ou `+valor categoria`.")
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_text))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_text), group=3)
 
-    print("Bot v14.0 (Handlers em Ordem Definitiva) iniciado!")
+    print("Bot v15.0 (Estrutura de Prioridades Definitiva) iniciado!")
     application.run_polling()
 
 if __name__ == '__main__':
