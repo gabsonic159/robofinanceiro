@@ -676,7 +676,7 @@ def main():
         fallbacks=[CommandHandler('cancelar', cancelar_conversa)],
     )
     # Adiciona as conversas ao aplicativo PRIMEIRO
-    application.add_handler(transacao_conv)
+    #application.add_handler(transacao_conv)
     application.add_handler(relatorio_conv)
 
     # --- Handlers de Comandos Normais ---
