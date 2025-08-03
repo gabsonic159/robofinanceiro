@@ -521,20 +521,15 @@ def main():
     )
 
     relatorio_conv = ConversationHandler(
-        # ### CORREÇÃO AQUI ###
-        # Adicionamos o MessageHandler do botão para DENTRO dos entry_points.
-        # Agora, tanto o comando /relatorio quanto o botão 📊 Relatório iniciam a conversa corretamente.
-        entry_points=[
-            CommandHandler('relatorio', iniciar_relatorio),
-            MessageHandler(filters.Regex('^📊 Relatório$'), iniciar_relatorio)
-        ],
-        states={
-            ESCOLHER_PERIODO: [CallbackQueryHandler(processar_escolha_periodo, pattern="^rel_")],
-            AGUARDANDO_DATA_INICIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_inicio)],
-            AGUARDANDO_DATA_FIM: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_fim)],
-        },
-        fallbacks=[CommandHandler('cancelar', cancelar_conversa)],
-    )
+    # ### MUDANÇA 1 ###: Apague a parte do MessageHandler daqui
+    entry_points=[CommandHandler('relatorio', iniciar_relatorio)],
+    states={
+        ESCOLHER_PERIODO: [CallbackQueryHandler(processar_escolha_periodo, pattern="^rel_")],
+        AGUARDANDO_DATA_INICIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_inicio)],
+        AGUARDANDO_DATA_FIM: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_fim)],
+    },
+    fallbacks=[CommandHandler('cancelar', cancelar_conversa)],
+)
     
     # Adiciona as conversas primeiro, para que tenham prioridade sobre mensagens genéricas.
     application.add_handler(transacao_conv)
@@ -558,6 +553,7 @@ def main():
 
     # --- Handlers de Botões Permanentes (que não iniciam conversas) ---
     # O handler do "Relatório" foi removido daqui pois agora ele está dentro da ConversationHandler.
+    application.add_handler(MessageHandler(filters.Regex('^📊 Relatório$'), iniciar_relatorio))
     application.add_handler(MessageHandler(filters.Regex('^🗂️ Categorias$'), list_categorias))
     application.add_handler(MessageHandler(filters.Regex('^💳 Cartões$'), menu_cartoes))
     application.add_handler(MessageHandler(filters.Regex('^💡 Ajuda$'), ajuda))
