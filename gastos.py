@@ -23,14 +23,11 @@ from telegram.ext import (
 )
 
 # --- Configuração da Base de Dados ---
-# No início do arquivo
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.getenv("RENDER_DISK_MOUNT_PATH", SCRIPT_DIR) 
-DB_PATH = os.path.join(DATA_DIR, "gastos_bot.db")
-
-# Garante que o diretório de dados exista
-if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR)
+# ### MUDANÇA ###: Removida a lógica do disco do Render, pois não está disponível no plano gratuito.
+# O banco de dados será "efêmero", ou seja, reiniciado com o servidor.
+# Isso é OK para desenvolvimento e para a sua estratégia atual.
+DB_PATH = os.path.join(SCRIPT_DIR, "gastos_bot.db")
 
 def inicializar_db():
     conn = sqlite3.connect(DB_PATH)
@@ -64,31 +61,69 @@ def gerar_grafico_pizza(gastos_por_categoria):
     return buf
 
 # --- Comandos Principais ---
+
+# ### MUDANÇA ###: Função start totalmente reformulada
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    telegram_id = update.message.from_user.id; conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-    if not get_user_id(telegram_id):
+    """Envia uma mensagem de boas-vindas e o menu principal."""
+    user = update.message.from_user
+    telegram_id = user.id
+    user_id_local = get_user_id(telegram_id)
+    
+    # Define o teclado de botões
+    reply_keyboard = [
+        ["📊 Relatório", "💳 Cartões"], 
+        ["🗂️ Categorias", "💡 Ajuda"], 
+        ["⏰ Lembretes/Agendamentos", "⬇️ Exportar"],
+        ["🏠 Menu Principal"] # Botão para voltar ao início
+    ]
+    markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
+
+    if not user_id_local:
+        # Mensagem para novos usuários
         data_criacao_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-        cursor.execute("INSERT INTO usuarios (telegram_id, nome_usuario, data_criacao, dias_sequencia) VALUES (?, ?, ?, ?)", (telegram_id, update.message.from_user.username, data_criacao_str, 0)); conn.commit()
-    conn.close()
-    reply_keyboard = [["📊 Relatório", "💳 Cartões"], ["🗂️ Categorias", "💡 Ajuda"], ["⏰ Lembretes/Agendamentos", "⬇️ Exportar"]]
-    await update.message.reply_text('Olá! Sou seu assistente financeiro. O que vamos organizar hoje?', reply_markup=ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True))
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO usuarios (telegram_id, nome_usuario, data_criacao, dias_sequencia) VALUES (?, ?, ?, ?)", 
+                       (telegram_id, user.username, data_criacao_str, 0))
+        conn.commit()
+        conn.close()
+        
+        welcome_text = (
+            f"Olá, {user.first_name}! 👋 Seja muito bem-vindo(a) ao seu novo Assistente Financeiro.\n\n"
+            "Estou aqui para te ajudar a ter um controle total sobre suas finanças de forma simples e rápida.\n\n"
+            "Para começar, é muito fácil:\n"
+            "➡️ **Registre um gasto:** `-50 mercado`\n"
+            "➡️ **Registre uma receita:** `+1000 salário`\n\n"
+            "Use os botões abaixo para explorar todas as funcionalidades. Qualquer dúvida, clique em '💡 Ajuda'."
+        )
+        await update.message.reply_text(welcome_text, reply_markup=markup)
+    else:
+        # Mensagem para usuários que já iniciaram o bot antes
+        welcome_back_text = f"Olá de volta, {user.first_name}! O que vamos organizar hoje?"
+        await update.message.reply_text(welcome_back_text, reply_markup=markup)
 
 async def ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto_ajuda = (
         "🤖 *Comandos e Funções*\n\n"
+        "Para registrar uma transação, basta enviar uma mensagem no formato:\n"
+        "`-valor categoria` (para gastos)\n"
+        "`+valor categoria` (para receitas)\n\n"
         "💳 *Cartões de Crédito:*\n"
-        "   `/add_cartao <nome> <limite> <dia_fecha>`\n"
-        "   `/list_cartoes`\n"
-        "   `/fatura <nome_cartao>`\n"
-        "   `/del_cartao <nome>`\n\n"
+        "  `/add_cartao <nome> <limite> <dia_fecha>`\n"
+        "  `/list_cartoes`\n"
+        "  `/fatura <nome_cartao>`\n"
+        "  `/del_cartao <nome>`\n\n"
         "⏰ *Lembretes e Agendamentos:*\n"
-        "   `/lembrete <HH:MM>` (Lembrete diário)\n"
-        "   `/agendar <dia> <HH:MM> [valor] <título>`\n\n"
+        "  `/lembrete <HH:MM>` (Lembrete diário)\n"
+        "  `/agendar <dia> <HH:MM> [valor] <título>`\n\n"
         "📊 *Análise e Exportação:*\n"
-        "   `/relatorio`\n"
-        "   `/exportar`"
+        "  `/relatorio`\n"
+        "  `/exportar`"
     )
     await update.message.reply_text(texto_ajuda, parse_mode='Markdown')
+
+# ... (o resto do seu código permanece exatamente o mesmo) ...
+# Copie e cole todo o restante do seu código a partir daqui
 
 # --- Módulo de Lembretes e Agendamentos ---
 async def menu_lembretes_e_agendamentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -101,6 +136,7 @@ async def menu_lembretes_e_agendamentos(update: Update, context: ContextTypes.DE
              "`/ver_agendamentos`\n"
              "`/cancelar_agendamento <título>`")
     await update.message.reply_text(texto, parse_mode='Markdown')
+
 # (As funções de lembrete e agendamento estão mais abaixo, em "Tarefas Agendadas")
 
 # --- Módulo de Gestão de Cartões ---
@@ -237,7 +273,7 @@ async def gerar_relatorio(update: Update, context: ContextTypes.DEFAULT_TYPE, da
         legenda_texto.append("\n*Gastos por Categoria:*")
         for nome, total in gastos_por_categoria:
             percentual = (total / saidas) * 100 if saidas > 0 else 0
-            legenda_texto.append(f"  - {nome.capitalize()}: R$ {total:.2f} ({percentual:.1f}%)")
+            legenda_texto.append(f"  - {nome.capitalize()}: R$ {total:.2f} ({percentual:.1f}%)")
     buffer_imagem = gerar_grafico_pizza(gastos_por_categoria); mensagem_final = "\n".join(legenda_texto)
     if update.callback_query: await update.callback_query.delete_message()
     if buffer_imagem: await context.bot.send_photo(chat_id=update.effective_chat.id, photo=buffer_imagem, caption=mensagem_final, parse_mode='Markdown')
@@ -464,12 +500,10 @@ def carregar_tarefas_agendadas(application: Application):
 
 def main():
     inicializar_db()
-    # TOKEN = "8171923848:AAGfYmKIQmyGMY5i4xjn6p8HXyNzKYgVEks" # Insira seu token aqui# ↓↓↓ ADICIONE OU CORRIJA ESTA PARTE ↓↓↓
     TOKEN = os.getenv("TELEGRAM_TOKEN")
     if not TOKEN:
-        print("ERRO: A variável de ambiente TELEGRAM_TOKEN não foi definida no Render.")
-        return # Isso para o script se não encontrar o token
-    # ↑↑↑ FIM DA CORREÇÃO ↑↑↑
+        print("ERRO: A variável de ambiente TELEGRAM_TOKEN não foi definida.")
+        return
     application = Application.builder().token(TOKEN).build()
     
     carregar_tarefas_agendadas(application)
@@ -517,6 +551,8 @@ def main():
     application.add_handler(MessageHandler(filters.Regex('^💡 Ajuda$'), ajuda))
     application.add_handler(MessageHandler(filters.Regex('^⏰ Lembretes/Agendamentos$'), menu_lembretes_e_agendamentos))
     application.add_handler(MessageHandler(filters.Regex('^⬇️ Exportar$'), exportar_csv))
+    # ### MUDANÇA ###: Novo handler para o botão "Menu Principal"
+    application.add_handler(MessageHandler(filters.Regex('^🏠 Menu Principal$'), start))
     
     application.add_handler(CallbackQueryHandler(desfazer_lancamento, pattern="^undo:"))
     
@@ -524,7 +560,7 @@ def main():
         await update.message.reply_text("Não entendi. Para registar uma transação, use o formato `-valor categoria` ou `+valor categoria`.")
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_text))
 
-    print("Bot v11.0 (Edição Definitiva) iniciado!")
+    print("Bot v12.0 (Melhorias de UX) iniciado!")
     application.run_polling()
 
 if __name__ == '__main__':
