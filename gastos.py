@@ -24,9 +24,6 @@ from telegram.ext import (
 
 # --- Configuração da Base de Dados ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-# ### MUDANÇA ###: Removida a lógica do disco do Render, pois não está disponível no plano gratuito.
-# O banco de dados será "efêmero", ou seja, reiniciado com o servidor.
-# Isso é OK para desenvolvimento e para a sua estratégia atual.
 DB_PATH = os.path.join(SCRIPT_DIR, "gastos_bot.db")
 
 def inicializar_db():
@@ -43,6 +40,10 @@ def inicializar_db():
     # Tabelas para Lembretes e Agendamentos
     cursor.execute('CREATE TABLE IF NOT EXISTS lembretes_diarios (id_usuario INTEGER PRIMARY KEY, horario TEXT, chat_id INTEGER, FOREIGN KEY (id_usuario) REFERENCES usuarios(id))')
     cursor.execute('CREATE TABLE IF NOT EXISTS agendamentos (id INTEGER PRIMARY KEY AUTOINCREMENT, id_usuario INTEGER, dia INTEGER, horario TEXT, titulo TEXT, valor REAL, chat_id INTEGER, UNIQUE(id_usuario, titulo), FOREIGN KEY (id_usuario) REFERENCES usuarios(id))')
+    
+    # ### MUDANÇA ###: Nova tabela para orçamentos
+    cursor.execute('CREATE TABLE IF NOT EXISTS orcamentos (id INTEGER PRIMARY KEY AUTOINCREMENT, id_usuario INTEGER, id_categoria INTEGER, valor REAL, UNIQUE(id_usuario, id_categoria), FOREIGN KEY (id_usuario) REFERENCES usuarios(id), FOREIGN KEY (id_categoria) REFERENCES categorias(id))')
+    
     conn.commit()
     conn.close()
 
@@ -61,25 +62,21 @@ def gerar_grafico_pizza(gastos_por_categoria):
     return buf
 
 # --- Comandos Principais ---
-
-# ### MUDANÇA ###: Função start totalmente reformulada
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Envia uma mensagem de boas-vindas e o menu principal."""
     user = update.message.from_user
     telegram_id = user.id
     user_id_local = get_user_id(telegram_id)
     
-    # Define o teclado de botões
     reply_keyboard = [
         ["📊 Relatório", "💳 Cartões"], 
         ["🗂️ Categorias", "💡 Ajuda"], 
         ["⏰ Lembretes/Agendamentos", "⬇️ Exportar"],
-        ["🏠 Menu Principal"] # Botão para voltar ao início
+        ["🏠 Menu Principal"]
     ]
     markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
 
     if not user_id_local:
-        # Mensagem para novos usuários
         data_criacao_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -98,16 +95,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(welcome_text, reply_markup=markup)
     else:
-        # Mensagem para usuários que já iniciaram o bot antes
         welcome_back_text = f"Olá de volta, {user.first_name}! O que vamos organizar hoje?"
         await update.message.reply_text(welcome_back_text, reply_markup=markup)
 
+# ### MUDANÇA ###: Menu de ajuda atualizado
 async def ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto_ajuda = (
         "🤖 *Comandos e Funções*\n\n"
         "Para registrar uma transação, basta enviar uma mensagem no formato:\n"
         "`-valor categoria` (para gastos)\n"
         "`+valor categoria` (para receitas)\n\n"
+        "💰 *Orçamentos:*\n"
+        "  `/orcamento <categoria> <valor>`\n"
+        "  `/meus_orcamentos`\n"
+        "  `/del_orcamento <categoria>`\n\n"
         "💳 *Cartões de Crédito:*\n"
         "  `/add_cartao <nome> <limite> <dia_fecha>`\n"
         "  `/list_cartoes`\n"
@@ -122,8 +123,111 @@ async def ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(texto_ajuda, parse_mode='Markdown')
 
-# ... (o resto do seu código permanece exatamente o mesmo) ...
-# Copie e cole todo o restante do seu código a partir daqui
+# --- Módulo de Orçamentos ---
+# ### MUDANÇA ###: Novas funções para gerenciar orçamentos
+async def set_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = get_user_id(update.message.from_user.id)
+    try:
+        args = context.args
+        valor = float(args[-1].replace(',', '.'))
+        nome_categoria = " ".join(args[:-1]).lower()
+
+        if not nome_categoria or valor <= 0: raise ValueError()
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Procura a categoria. Se não existir, cria.
+        cursor.execute("SELECT id FROM categorias WHERE id_usuario = ? AND nome = ?", (user_id, nome_categoria))
+        categoria = cursor.fetchone()
+        if not categoria:
+            cursor.execute("INSERT INTO categorias (id_usuario, nome) VALUES (?, ?)", (user_id, nome_categoria))
+            conn.commit()
+            categoria_id = cursor.lastrowid
+        else:
+            categoria_id = categoria[0]
+            
+        # Insere ou atualiza o orçamento
+        cursor.execute("REPLACE INTO orcamentos (id_usuario, id_categoria, valor) VALUES (?, ?, ?)", (user_id, categoria_id, valor))
+        conn.commit()
+        conn.close()
+        
+        await update.message.reply_text(f"✅ Orçamento de R$ {valor:.2f} definido para a categoria '{nome_categoria.capitalize()}'.")
+
+    except (IndexError, ValueError):
+        await update.message.reply_text("Formato inválido! Use: `/orcamento <categoria> <valor>`\nExemplo: `/orcamento lazer 300`")
+
+async def list_orcamentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = get_user_id(update.message.from_user.id)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Busca os orçamentos e os gastos do mês atual para cada um
+    agora_utc = datetime.now(timezone.utc)
+    inicio_mes_str = agora_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
+
+    query = """
+    SELECT c.nome, o.valor, (
+        SELECT SUM(t.valor) 
+        FROM transacoes t 
+        WHERE t.id_categoria = c.id AND t.id_usuario = ? AND t.tipo = 'saida' AND t.data_transacao >= ?
+    ) as gasto_total
+    FROM orcamentos o
+    JOIN categorias c ON o.id_categoria = c.id
+    WHERE o.id_usuario = ?
+    ORDER BY c.nome
+    """
+    cursor.execute(query, (user_id, inicio_mes_str, user_id))
+    orcamentos = cursor.fetchall()
+    conn.close()
+    
+    if not orcamentos:
+        await update.message.reply_text("Você ainda não definiu nenhum orçamento. Use `/orcamento <categoria> <valor>` para começar.")
+        return
+
+    resposta = ["💰 *Seus Orçamentos para este Mês:*\n"]
+    for nome_cat, valor_orc, gasto_total in orcamentos:
+        gasto_total = gasto_total or 0.0
+        percentual = (gasto_total / valor_orc) * 100 if valor_orc > 0 else 0
+        resposta.append(f"🔹 *{nome_cat.capitalize()}*")
+        resposta.append(f"   Gastou: R$ {gasto_total:.2f} de R$ {valor_orc:.2f} ({percentual:.1f}%)")
+    
+    await update.message.reply_text("\n".join(resposta), parse_mode='Markdown')
+
+async def del_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = get_user_id(update.message.from_user.id)
+    try:
+        nome_categoria = " ".join(context.args).lower()
+        if not nome_categoria: raise ValueError()
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        # Encontrar o ID da categoria para poder deletar o orçamento
+        cursor.execute("SELECT id FROM categorias WHERE id_usuario = ? AND nome = ?", (user_id, nome_categoria))
+        categoria = cursor.fetchone()
+        
+        if not categoria:
+            await update.message.reply_text(f"Não encontrei a categoria '{nome_categoria.capitalize()}'.")
+            conn.close()
+            return
+
+        categoria_id = categoria[0]
+        cursor.execute("DELETE FROM orcamentos WHERE id_usuario = ? AND id_categoria = ?", (user_id, categoria_id))
+        
+        if cursor.rowcount > 0:
+            conn.commit()
+            await update.message.reply_text(f"✅ Orçamento para '{nome_categoria.capitalize()}' removido.")
+        else:
+            await update.message.reply_text(f"Você não tinha um orçamento definido para '{nome_categoria.capitalize()}'.")
+        
+        conn.close()
+
+    except (IndexError, ValueError):
+        await update.message.reply_text("Formato inválido! Use: `/del_orcamento <categoria>`")
+
+# ... (o resto do seu código permanece o mesmo até a função registrar_transacao_final) ...
+# Copie e cole todo o restante do seu código aqui, e substitua a função registrar_transacao_final pela abaixo
 
 # --- Módulo de Lembretes e Agendamentos ---
 async def menu_lembretes_e_agendamentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -377,36 +481,75 @@ async def receber_forma_pagamento(update: Update, context: ContextTypes.DEFAULT_
     await registrar_transacao_final(update, context, user_id, dados_transacao['nome_categoria'], dados_transacao['sinal'], dados_transacao['valor_str'], id_cartao=id_cartao)
     return ConversationHandler.END
 
+# ### MUDANÇA ###: Função de registro de transação agora verifica o orçamento
 async def registrar_transacao_final(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id, nome_categoria, sinal, valor_str, id_cartao=None, is_scheduled=False):
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-    cursor.execute("SELECT id FROM categorias WHERE id_usuario = ? AND nome = ?", (user_id, nome_categoria)); categoria = cursor.fetchone()
-    if not categoria: cursor.execute("INSERT INTO categorias (id_usuario, nome) VALUES (?, ?)", (user_id, nome_categoria)); conn.commit(); categoria_id = cursor.lastrowid
-    else: categoria_id = categoria[0]
-    tipo = 'saida' if sinal == '-' else 'entrada'; valor = float(valor_str.replace(',', '.')); data_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-    cursor.execute("INSERT INTO transacoes (id_usuario, id_categoria, valor, tipo, data_transacao, id_cartao) VALUES (?, ?, ?, ?, ?, ?)", (user_id, categoria_id, valor, tipo, data_str, id_cartao)); new_transaction_id = cursor.lastrowid
     
+    # Garante que a categoria existe e pega o ID
+    cursor.execute("SELECT id FROM categorias WHERE id_usuario = ? AND nome = ?", (user_id, nome_categoria)); categoria = cursor.fetchone()
+    if not categoria: 
+        cursor.execute("INSERT INTO categorias (id_usuario, nome) VALUES (?, ?)", (user_id, nome_categoria)); conn.commit()
+        categoria_id = cursor.lastrowid
+    else: 
+        categoria_id = categoria[0]
+        
+    tipo = 'saida' if sinal == '-' else 'entrada'
+    valor = float(valor_str.replace(',', '.'))
+    data_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    
+    # Insere a transação
+    cursor.execute("INSERT INTO transacoes (id_usuario, id_categoria, valor, tipo, data_transacao, id_cartao) VALUES (?, ?, ?, ?, ?, ?)", (user_id, categoria_id, valor, tipo, data_str, id_cartao))
+    new_transaction_id = cursor.lastrowid
+    
+    # Gamificação da sequência
     mensagem_sequencia = ""
     if not is_scheduled:
-        hoje_str = datetime.now(timezone.utc).strftime('%Y-%m-%d'); cursor.execute("SELECT ultimo_lancamento, dias_sequencia FROM usuarios WHERE id = ?", (user_id,)); ultimo_lancamento, dias_sequencia = cursor.fetchone(); dias_sequencia = dias_sequencia or 0
+        hoje_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        cursor.execute("SELECT ultimo_lancamento, dias_sequencia FROM usuarios WHERE id = ?", (user_id,))
+        ultimo_lancamento, dias_sequencia = cursor.fetchone()
+        dias_sequencia = dias_sequencia or 0
         if ultimo_lancamento != hoje_str:
             ontem_str = (datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%d')
             nova_sequencia = dias_sequencia + 1 if ultimo_lancamento == ontem_str else 1
             mensagem_sequencia = f"\n\n🔥 Sequência de {nova_sequencia} dias!" if nova_sequencia > 1 else "\n\n💪 Nova sequência iniciada!"
             cursor.execute("UPDATE usuarios SET ultimo_lancamento = ?, dias_sequencia = ? WHERE id = ?", (hoje_str, nova_sequencia, user_id))
     
-    conn.commit(); conn.close()
+    # Verificação do orçamento
+    mensagem_orcamento = ""
+    if tipo == 'saida':
+        cursor.execute("SELECT valor FROM orcamentos WHERE id_usuario = ? AND id_categoria = ?", (user_id, categoria_id))
+        orcamento = cursor.fetchone()
+        if orcamento:
+            orcamento_valor = orcamento[0]
+            agora_utc = datetime.now(timezone.utc)
+            inicio_mes_str = agora_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
+            
+            cursor.execute("SELECT SUM(valor) FROM transacoes WHERE id_usuario = ? AND id_categoria = ? AND tipo = 'saida' AND data_transacao >= ?", (user_id, categoria_id, inicio_mes_str))
+            gasto_total_mes = cursor.fetchone()[0] or 0.0
+            
+            percentual = (gasto_total_mes / orcamento_valor) * 100
+            mensagem_orcamento = f"\n\n💰 *Orçamento:* Você gastou R$ {gasto_total_mes:.2f} de R$ {orcamento_valor:.2f} ({percentual:.1f}%) em '{nome_categoria.capitalize()}' este mês."
+            if gasto_total_mes > orcamento_valor:
+                mensagem_orcamento += "\n⚠️ *Atenção: Você ultrapassou o orçamento para esta categoria!*"
+
+    conn.commit()
+    conn.close()
+    
     if is_scheduled:
-        await context.bot.send_message(chat_id=context.job.chat_id, text=f"✅ Gasto agendado de '{nome_categoria}' (R$ {valor:.2f}) foi registado automaticamente.")
+        await context.bot.send_message(chat_id=context.job.chat_id, text=f"✅ Gasto agendado de '{nome_categoria}' (R$ {valor:.2f}) foi registado automaticamente.{mensagem_orcamento}", parse_mode='Markdown')
         return
     
     respostas_possiveis = [f"✅ Anotado!", f"Ok, registado! 👍", f"Prontinho!", f"Na conta! 📝"]
     mensagem = random.choice(respostas_possiveis)
     detalhes_msg = f"\n**Categoria:** {nome_categoria.capitalize()}\n**Valor:** R$ {valor:.2f}"
+    
     if id_cartao:
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
         cursor.execute("SELECT nome FROM cartoes WHERE id = ?", (id_cartao,)); nome_cartao = cursor.fetchone()[0]; conn.close()
         detalhes_msg += f"\n**Cartão:** {nome_cartao}"
-    mensagem += detalhes_msg + mensagem_sequencia; keyboard = [[InlineKeyboardButton("↩️ Desfazer", callback_data=f"undo:{new_transaction_id}")]]
+        
+    mensagem += detalhes_msg + mensagem_sequencia + mensagem_orcamento
+    keyboard = [[InlineKeyboardButton("↩️ Desfazer", callback_data=f"undo:{new_transaction_id}")]]
     
     target_message = update.callback_query.message if update.callback_query else update.message
     await target_message.reply_text(text=mensagem, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -544,6 +687,11 @@ def main():
     application.add_handler(CommandHandler("agendar", agendar_conta))
     application.add_handler(CommandHandler("ver_agendamentos", ver_agendamentos))
     application.add_handler(CommandHandler("cancelar_agendamento", cancelar_agendamento))
+    
+    # ### MUDANÇA ###: Novos handlers para os comandos de orçamento
+    application.add_handler(CommandHandler("orcamento", set_orcamento))
+    application.add_handler(CommandHandler("meus_orcamentos", list_orcamentos))
+    application.add_handler(CommandHandler("del_orcamento", del_orcamento))
 
     # Handlers de Botões Permanentes
     application.add_handler(MessageHandler(filters.Regex('^📊 Relatório$'), iniciar_relatorio))
@@ -552,7 +700,6 @@ def main():
     application.add_handler(MessageHandler(filters.Regex('^💡 Ajuda$'), ajuda))
     application.add_handler(MessageHandler(filters.Regex('^⏰ Lembretes/Agendamentos$'), menu_lembretes_e_agendamentos))
     application.add_handler(MessageHandler(filters.Regex('^⬇️ Exportar$'), exportar_csv))
-    # ### MUDANÇA ###: Novo handler para o botão "Menu Principal"
     application.add_handler(MessageHandler(filters.Regex('^🏠 Menu Principal$'), start))
     
     application.add_handler(CallbackQueryHandler(desfazer_lancamento, pattern="^undo:"))
@@ -561,7 +708,7 @@ def main():
         await update.message.reply_text("Não entendi. Para registar uma transação, use o formato `-valor categoria` ou `+valor categoria`.")
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_text))
 
-    print("Bot v12.0 (Melhorias de UX) iniciado!")
+    print("Bot v13.0 (Orçamentos) iniciado!")
     application.run_polling()
 
 if __name__ == '__main__':
