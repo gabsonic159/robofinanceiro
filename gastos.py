@@ -22,7 +22,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# --- Configuração da Base de Dados ---
+# --- Configuração da Base de Dados --- testetes 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # ### MUDANÇA ###: Removida a lógica do disco do Render, pois não está disponível no plano gratuito.
 # O banco de dados será "efêmero", ou seja, reiniciado com o servidor.
