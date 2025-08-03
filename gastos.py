@@ -663,13 +663,11 @@ def main():
     )
 
     relatorio_conv = ConversationHandler(
-        # ESTA É A FORMA CORRETA: A conversa é iniciada por um comando OU pelo texto exato do botão.
         entry_points=[
             CommandHandler('relatorio', iniciar_relatorio),
             MessageHandler(filters.Regex('^📊 Relatório$'), iniciar_relatorio)
         ],
         states={
-            # Uma vez dentro da conversa, o bot espera por um clique nos botões inline.
             ESCOLHER_PERIODO: [CallbackQueryHandler(processar_escolha_periodo, pattern="^rel_")],
             AGUARDANDO_DATA_INICIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_inicio)],
             AGUARDANDO_DATA_FIM: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_fim)],
@@ -682,7 +680,6 @@ def main():
     application.add_handler(relatorio_conv)
 
     # --- Handlers de Comandos Normais ---
-    # Adicionados depois das conversas.
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("ajuda", ajuda))
     application.add_handler(CommandHandler("listarcategorias", list_categorias))
@@ -713,11 +710,15 @@ def main():
     application.add_handler(CallbackQueryHandler(desfazer_lancamento, pattern="^undo:"))
     
     # --- Handler de Fallback ---
-    # Este deve ser o ÚLTIMO handler de mensagem de texto para capturar o que não foi entendido.
+    # ### CORREÇÃO ###: A definição da função estava faltando. Adicionada de volta.
+    async def fallback_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text("Não entendi. Para registar uma transação, use o formato `-valor categoria` ou `+valor categoria`.")
+    
+    # Este deve ser o ÚLTIMO handler de mensagem de texto.
     fallback_handler = MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_text)
     application.add_handler(fallback_handler)
 
-    print("Bot v13.1 (Correção de Relatório) iniciado!")
+    print("Bot v13.2 (Correção Final de Handlers) iniciado!")
     application.run_polling()
 
 if __name__ == '__main__':
