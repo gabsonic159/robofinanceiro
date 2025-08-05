@@ -22,11 +22,8 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# --- Configuração da Base de Dados --- test
+# --- Configuração da Base de Dados ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-# ### MUDANÇA ###: Removida a lógica do disco do Render, pois não está disponível no plano gratuito.
-# O banco de dados será "efêmero", ou seja, reiniciado com o servidor.
-# Isso é OK para desenvolvimento e para a sua estratégia atual.
 DB_PATH = os.path.join(SCRIPT_DIR, "gastos_bot.db")
 
 def inicializar_db():
@@ -43,6 +40,10 @@ def inicializar_db():
     # Tabelas para Lembretes e Agendamentos
     cursor.execute('CREATE TABLE IF NOT EXISTS lembretes_diarios (id_usuario INTEGER PRIMARY KEY, horario TEXT, chat_id INTEGER, FOREIGN KEY (id_usuario) REFERENCES usuarios(id))')
     cursor.execute('CREATE TABLE IF NOT EXISTS agendamentos (id INTEGER PRIMARY KEY AUTOINCREMENT, id_usuario INTEGER, dia INTEGER, horario TEXT, titulo TEXT, valor REAL, chat_id INTEGER, UNIQUE(id_usuario, titulo), FOREIGN KEY (id_usuario) REFERENCES usuarios(id))')
+    
+    # ### NOVO ###: Nova tabela para orçamentos
+    cursor.execute('CREATE TABLE IF NOT EXISTS orcamentos (id INTEGER PRIMARY KEY AUTOINCREMENT, id_usuario INTEGER, id_categoria INTEGER, valor REAL, UNIQUE(id_usuario, id_categoria), FOREIGN KEY (id_usuario) REFERENCES usuarios(id), FOREIGN KEY (id_categoria) REFERENCES categorias(id))')
+    
     conn.commit()
     conn.close()
 
@@ -61,25 +62,20 @@ def gerar_grafico_pizza(gastos_por_categoria):
     return buf
 
 # --- Comandos Principais ---
-
-# ### MUDANÇA ###: Função start totalmente reformulada
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Envia uma mensagem de boas-vindas e o menu principal."""
     user = update.message.from_user
     telegram_id = user.id
     user_id_local = get_user_id(telegram_id)
     
-    # Define o teclado de botões
     reply_keyboard = [
         ["📊 Relatório", "💳 Cartões"], 
         ["🗂️ Categorias", "💡 Ajuda"], 
         ["⏰ Lembretes/Agendamentos", "⬇️ Exportar"],
-        ["🏠 Menu Principal"] # Botão para voltar ao início
+        ["🏠 Menu Principal"]
     ]
     markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
 
     if not user_id_local:
-        # Mensagem para novos usuários
         data_criacao_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -98,16 +94,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(welcome_text, reply_markup=markup)
     else:
-        # Mensagem para usuários que já iniciaram o bot antes
         welcome_back_text = f"Olá de volta, {user.first_name}! O que vamos organizar hoje?"
         await update.message.reply_text(welcome_back_text, reply_markup=markup)
 
 async def ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ### NOVO ###: Adicionados comandos de orçamento à ajuda
     texto_ajuda = (
         "🤖 *Comandos e Funções*\n\n"
         "Para registrar uma transação, basta enviar uma mensagem no formato:\n"
         "`-valor categoria` (para gastos)\n"
         "`+valor categoria` (para receitas)\n\n"
+        "💰 *Orçamentos:*\n"
+        "  `/orcamento <categoria> <valor>`\n"
+        "  `/meus_orcamentos`\n"
+        "  `/del_orcamento <categoria>`\n\n"
         "💳 *Cartões de Crédito:*\n"
         "  `/add_cartao <nome> <limite> <dia_fecha>`\n"
         "  `/list_cartoes`\n"
@@ -122,8 +122,103 @@ async def ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(texto_ajuda, parse_mode='Markdown')
 
-# ... (o resto do seu código permanece exatamente o mesmo) ...
-# Copie e cole todo o restante do seu código a partir daqui
+# ### NOVO ###: Módulo de Orçamentos
+async def set_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = get_user_id(update.message.from_user.id)
+    try:
+        args = context.args
+        valor = float(args[-1].replace(',', '.'))
+        nome_categoria = " ".join(args[:-1]).lower()
+
+        if not nome_categoria or valor <= 0: raise ValueError()
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT id FROM categorias WHERE id_usuario = ? AND nome = ?", (user_id, nome_categoria))
+        categoria = cursor.fetchone()
+        if not categoria:
+            cursor.execute("INSERT INTO categorias (id_usuario, nome) VALUES (?, ?)", (user_id, nome_categoria))
+            conn.commit()
+            categoria_id = cursor.lastrowid
+        else:
+            categoria_id = categoria[0]
+            
+        cursor.execute("REPLACE INTO orcamentos (id_usuario, id_categoria, valor) VALUES (?, ?, ?)", (user_id, categoria_id, valor))
+        conn.commit()
+        conn.close()
+        
+        await update.message.reply_text(f"✅ Orçamento de R$ {valor:.2f} definido para a categoria '{nome_categoria.capitalize()}'.")
+
+    except (IndexError, ValueError):
+        await update.message.reply_text("Formato inválido! Use: `/orcamento <categoria> <valor>`\nExemplo: `/orcamento lazer 300`")
+
+async def list_orcamentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = get_user_id(update.message.from_user.id)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    agora_utc = datetime.now(timezone.utc)
+    inicio_mes_str = agora_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
+
+    query = """
+    SELECT c.nome, o.valor, (
+        SELECT SUM(t.valor) 
+        FROM transacoes t 
+        WHERE t.id_categoria = c.id AND t.id_usuario = ? AND t.tipo = 'saida' AND t.data_transacao >= ?
+    ) as gasto_total
+    FROM orcamentos o
+    JOIN categorias c ON o.id_categoria = c.id
+    WHERE o.id_usuario = ?
+    ORDER BY c.nome
+    """
+    cursor.execute(query, (user_id, inicio_mes_str, user_id))
+    orcamentos = cursor.fetchall()
+    conn.close()
+    
+    if not orcamentos:
+        await update.message.reply_text("Você ainda não definiu nenhum orçamento. Use `/orcamento <categoria> <valor>` para começar.")
+        return
+
+    resposta = ["💰 *Seus Orçamentos para este Mês:*\n"]
+    for nome_cat, valor_orc, gasto_total in orcamentos:
+        gasto_total = gasto_total or 0.0
+        percentual = (gasto_total / valor_orc) * 100 if valor_orc > 0 else 0
+        resposta.append(f"🔹 *{nome_cat.capitalize()}*")
+        resposta.append(f"   Gastou: R$ {gasto_total:.2f} de R$ {valor_orc:.2f} ({percentual:.1f}%)")
+    
+    await update.message.reply_text("\n".join(resposta), parse_mode='Markdown')
+
+async def del_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = get_user_id(update.message.from_user.id)
+    try:
+        nome_categoria = " ".join(context.args).lower()
+        if not nome_categoria: raise ValueError()
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT id FROM categorias WHERE id_usuario = ? AND nome = ?", (user_id, nome_categoria))
+        categoria = cursor.fetchone()
+        
+        if not categoria:
+            await update.message.reply_text(f"Não encontrei a categoria '{nome_categoria.capitalize()}'.")
+            conn.close()
+            return
+
+        categoria_id = categoria[0]
+        cursor.execute("DELETE FROM orcamentos WHERE id_usuario = ? AND id_categoria = ?", (user_id, categoria_id))
+        
+        if cursor.rowcount > 0:
+            conn.commit()
+            await update.message.reply_text(f"✅ Orçamento para '{nome_categoria.capitalize()}' removido.")
+        else:
+            await update.message.reply_text(f"Você não tinha um orçamento definido para '{nome_categoria.capitalize()}'.")
+        
+        conn.close()
+
+    except (IndexError, ValueError):
+        await update.message.reply_text("Formato inválido! Use: `/del_orcamento <categoria>`")
 
 # --- Módulo de Lembretes e Agendamentos ---
 async def menu_lembretes_e_agendamentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -136,8 +231,6 @@ async def menu_lembretes_e_agendamentos(update: Update, context: ContextTypes.DE
              "`/ver_agendamentos`\n"
              "`/cancelar_agendamento <título>`")
     await update.message.reply_text(texto, parse_mode='Markdown')
-
-# (As funções de lembrete e agendamento estão mais abaixo, em "Tarefas Agendadas")
 
 # --- Módulo de Gestão de Cartões ---
 async def menu_cartoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -239,10 +332,10 @@ async def iniciar_relatorio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def processar_escolha_periodo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); escolha = query.data; agora = datetime.now(timezone.utc)
     if escolha == "rel_mes_atual":
-        await query.edit_message_text("A gerar relatório do mês atual..."); inicio = agora.replace(day=1, hour=0, minute=0, second=0, microsecond=0); fim = (inicio + relativedelta(months=1)) - timedelta(seconds=1)
+        await query.edit_message_text("Gerando relatório do mês atual..."); inicio = agora.replace(day=1, hour=0, minute=0, second=0, microsecond=0); fim = (inicio + relativedelta(months=1)) - timedelta(seconds=1)
         return await gerar_relatorio(update, context, inicio, fim)
     elif escolha == "rel_mes_anterior":
-        await query.edit_message_text("A gerar relatório do mês anterior..."); primeiro_dia_mes_atual = agora.replace(day=1, hour=0, minute=0, second=0, microsecond=0); ultimo_dia_mes_anterior = primeiro_dia_mes_atual - timedelta(days=1); inicio = ultimo_dia_mes_anterior.replace(day=1, hour=0, minute=0, second=0, microsecond=0); fim = primeiro_dia_mes_atual - timedelta(seconds=1)
+        await query.edit_message_text("Gerando relatório do mês anterior..."); primeiro_dia_mes_atual = agora.replace(day=1, hour=0, minute=0, second=0, microsecond=0); ultimo_dia_mes_anterior = primeiro_dia_mes_atual - timedelta(days=1); inicio = ultimo_dia_mes_anterior.replace(day=1, hour=0, minute=0, second=0, microsecond=0); fim = primeiro_dia_mes_atual - timedelta(seconds=1)
         return await gerar_relatorio(update, context, inicio, fim)
     elif escolha == "rel_periodo_especifico":
         await query.edit_message_text("Ok. Por favor, envie-me a *data de início* no formato `DD/MM/AAAA`.", parse_mode='Markdown'); return AGUARDANDO_DATA_INICIO
@@ -255,7 +348,7 @@ async def receber_data_fim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         data_inicio = context.user_data['data_inicio_relatorio']; data_fim = datetime.strptime(update.message.text, '%d/%m/%Y'); data_fim = data_fim.replace(hour=23, minute=59, second=59)
         if data_inicio > data_fim: await update.message.reply_text("A data de fim não pode ser anterior à de início. Envie a data de fim novamente."); return AGUARDANDO_DATA_FIM
-        await update.message.reply_text("Certo! A gerar o seu relatório personalizado...")
+        await update.message.reply_text("Certo! Gerando o seu relatório personalizado...")
         del context.user_data['data_inicio_relatorio']
         fuso_local = pytz.timezone('America/Sao_Paulo'); inicio_local = fuso_local.localize(data_inicio); fim_local = fuso_local.localize(data_fim)
         return await gerar_relatorio(update, context, inicio_local.astimezone(timezone.utc), fim_local.astimezone(timezone.utc))
@@ -297,7 +390,7 @@ async def exportar_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_document(chat_id=update.effective_chat.id, document=data_bytes, filename=file_name, caption="Aqui está o seu relatório de transações do mês.")
 
 # --- Módulo de Transações (com Conversa e Inteligência) ---
-AGUARDANDO_PAGAMENTO, AGUARDANDO_SUGESTAO_CATEGORIA = range(10, 12) # Usa números diferentes para não colidir
+AGUARDANDO_PAGAMENTO, AGUARDANDO_SUGESTAO_CATEGORIA = range(10, 12)
 async def iniciar_processo_transacao(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text
     padrao = re.compile(r'^([+\-])\s*(\d+(?:[.,]\d{1,2})?)\s*(.*)$'); match = padrao.match(texto)
@@ -306,24 +399,21 @@ async def iniciar_processo_transacao(update: Update, context: ContextTypes.DEFAU
     if not nome_categoria: await update.message.reply_text("Adicione uma categoria. Ex: `-50 mercado`"); return ConversationHandler.END
     user_id = get_user_id(update.message.from_user.id)
     
-    # Verifica se a categoria existe
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT id FROM categorias WHERE id_usuario = ? AND nome = ?", (user_id, nome_categoria)); categoria = cursor.fetchone()
     
-    # Se a categoria NÃO existe, inicia a sugestão
     if not categoria:
         cursor.execute("SELECT nome FROM categorias WHERE id_usuario = ?", (user_id,)); todas_categorias = [cat[0] for cat in cursor.fetchall()]
         conn.close()
         if todas_categorias:
             melhor_sugestao, score = process.extractOne(nome_categoria, todas_categorias, scorer=fuzz.token_sort_ratio)
-            if score > 70: # Limiar de confiança para a sugestão
+            if score > 70:
                 context.user_data['sugestao_categoria'] = {'sinal': sinal, 'valor_str': valor_str, 'categoria_errada': nome_categoria, 'sugestao': melhor_sugestao}
                 keyboard = [[InlineKeyboardButton(f"Sim, usar '{melhor_sugestao.capitalize()}'", callback_data=f"sugestao_sim"), InlineKeyboardButton("Não, criar nova", callback_data=f"sugestao_nao")]]
                 await update.message.reply_text(f"Hmm, não encontrei a categoria '{nome_categoria}'. Quis dizer '{melhor_sugestao.capitalize()}'?", reply_markup=InlineKeyboardMarkup(keyboard))
                 return AGUARDANDO_SUGESTAO_CATEGORIA
     conn.close()
 
-    # Se a categoria existe ou não há sugestão, continua o fluxo normal
     context.user_data['transacao_pendente'] = {'sinal': sinal, 'valor_str': valor_str, 'nome_categoria': nome_categoria}
     if sinal == '+':
         await registrar_transacao_final(update, context, user_id, nome_categoria, sinal, valor_str)
@@ -348,8 +438,7 @@ async def tratar_sugestao_categoria(update: Update, context: ContextTypes.DEFAUL
     else: # sugestao_nao
         nome_categoria_correta = dados_sugestao['categoria_errada']
 
-    # Continua o fluxo de registo com a categoria (corrigida ou nova)
-    await query.edit_message_text(f"Ok, a usar a categoria '{nome_categoria_correta.capitalize()}'...")
+    await query.edit_message_text(f"Ok, usando a categoria '{nome_categoria_correta.capitalize()}'...")
     
     user_id = get_user_id(update.effective_user.id)
     context.user_data['transacao_pendente'] = {'sinal': dados_sugestao['sinal'], 'valor_str': dados_sugestao['valor_str'], 'nome_categoria': nome_categoria_correta}
@@ -373,7 +462,7 @@ async def receber_forma_pagamento(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("Ocorreu um erro. Tente registar novamente."); return ConversationHandler.END
     user_id = get_user_id(update.effective_user.id)
     id_cartao = int(query.data.split(':')[1]) if query.data.split(':')[1] != '0' else None
-    await query.edit_message_text("Ok, a registar...")
+    await query.edit_message_text("Ok, registando...")
     await registrar_transacao_final(update, context, user_id, dados_transacao['nome_categoria'], dados_transacao['sinal'], dados_transacao['valor_str'], id_cartao=id_cartao)
     return ConversationHandler.END
 
@@ -421,7 +510,6 @@ async def desfazer_lancamento(update: Update, context: ContextTypes.DEFAULT_TYPE
     else: cursor.execute("DELETE FROM transacoes WHERE id = ?", (transaction_id,)); conn.commit(); await query.edit_message_text("✅ Lançamento desfeito!")
     conn.close()
 
-# --- Módulo de Tarefas Agendadas ---
 async def definir_lembrete_diario(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id; user_id = get_user_id(update.message.from_user.id)
     try:
