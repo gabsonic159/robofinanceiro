@@ -40,10 +40,8 @@ def inicializar_db():
     # Tabelas para Lembretes e Agendamentos
     cursor.execute('CREATE TABLE IF NOT EXISTS lembretes_diarios (id_usuario INTEGER PRIMARY KEY, horario TEXT, chat_id INTEGER, FOREIGN KEY (id_usuario) REFERENCES usuarios(id))')
     cursor.execute('CREATE TABLE IF NOT EXISTS agendamentos (id INTEGER PRIMARY KEY AUTOINCREMENT, id_usuario INTEGER, dia INTEGER, horario TEXT, titulo TEXT, valor REAL, chat_id INTEGER, UNIQUE(id_usuario, titulo), FOREIGN KEY (id_usuario) REFERENCES usuarios(id))')
-    
-    # ### NOVO ###: Nova tabela para orçamentos
+    # Tabela de orçamentos
     cursor.execute('CREATE TABLE IF NOT EXISTS orcamentos (id INTEGER PRIMARY KEY AUTOINCREMENT, id_usuario INTEGER, id_categoria INTEGER, valor REAL, UNIQUE(id_usuario, id_categoria), FOREIGN KEY (id_usuario) REFERENCES usuarios(id), FOREIGN KEY (id_categoria) REFERENCES categorias(id))')
-    
     conn.commit()
     conn.close()
 
@@ -79,8 +77,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data_criacao_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO usuarios (telegram_id, nome_usuario, data_criacao, dias_sequencia) VALUES (?, ?, ?, ?)", 
-                       (telegram_id, user.username, data_criacao_str, 0))
+        cursor.execute("INSERT INTO usuarios (telegram_id, nome_usuario, data_criacao, dias_sequencia) VALUES (?, ?, ?, ?)", (telegram_id, user.username, data_criacao_str, 0))
         conn.commit()
         conn.close()
         
@@ -98,7 +95,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(welcome_back_text, reply_markup=markup)
 
 async def ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ### NOVO ###: Adicionados comandos de orçamento à ajuda
     texto_ajuda = (
         "🤖 *Comandos e Funções*\n\n"
         "Para registrar uma transação, basta enviar uma mensagem no formato:\n"
@@ -122,19 +118,16 @@ async def ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(texto_ajuda, parse_mode='Markdown')
 
-# ### NOVO ###: Módulo de Orçamentos
+# --- Módulo de Orçamentos ---
 async def set_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = get_user_id(update.message.from_user.id)
     try:
         args = context.args
         valor = float(args[-1].replace(',', '.'))
         nome_categoria = " ".join(args[:-1]).lower()
-
         if not nome_categoria or valor <= 0: raise ValueError()
-
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        
         cursor.execute("SELECT id FROM categorias WHERE id_usuario = ? AND nome = ?", (user_id, nome_categoria))
         categoria = cursor.fetchone()
         if not categoria:
@@ -143,13 +136,10 @@ async def set_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
             categoria_id = cursor.lastrowid
         else:
             categoria_id = categoria[0]
-            
         cursor.execute("REPLACE INTO orcamentos (id_usuario, id_categoria, valor) VALUES (?, ?, ?)", (user_id, categoria_id, valor))
         conn.commit()
         conn.close()
-        
         await update.message.reply_text(f"✅ Orçamento de R$ {valor:.2f} definido para a categoria '{nome_categoria.capitalize()}'.")
-
     except (IndexError, ValueError):
         await update.message.reply_text("Formato inválido! Use: `/orcamento <categoria> <valor>`\nExemplo: `/orcamento lazer 300`")
 
@@ -157,10 +147,8 @@ async def list_orcamentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = get_user_id(update.message.from_user.id)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
     agora_utc = datetime.now(timezone.utc)
     inicio_mes_str = agora_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
-
     query = """
     SELECT c.nome, o.valor, (
         SELECT SUM(t.valor) 
@@ -175,18 +163,14 @@ async def list_orcamentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute(query, (user_id, inicio_mes_str, user_id))
     orcamentos = cursor.fetchall()
     conn.close()
-    
     if not orcamentos:
         await update.message.reply_text("Você ainda não definiu nenhum orçamento. Use `/orcamento <categoria> <valor>` para começar.")
         return
-
     resposta = ["💰 *Seus Orçamentos para este Mês:*\n"]
     for nome_cat, valor_orc, gasto_total in orcamentos:
         gasto_total = gasto_total or 0.0
         percentual = (gasto_total / valor_orc) * 100 if valor_orc > 0 else 0
-        resposta.append(f"🔹 *{nome_cat.capitalize()}*")
-        resposta.append(f"   Gastou: R$ {gasto_total:.2f} de R$ {valor_orc:.2f} ({percentual:.1f}%)")
-    
+        resposta.append(f"🔹 *{nome_cat.capitalize()}*: R$ {gasto_total:.2f} de R$ {valor_orc:.2f} ({percentual:.1f}%)")
     await update.message.reply_text("\n".join(resposta), parse_mode='Markdown')
 
 async def del_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -194,29 +178,22 @@ async def del_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         nome_categoria = " ".join(context.args).lower()
         if not nome_categoria: raise ValueError()
-
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-
         cursor.execute("SELECT id FROM categorias WHERE id_usuario = ? AND nome = ?", (user_id, nome_categoria))
         categoria = cursor.fetchone()
-        
         if not categoria:
             await update.message.reply_text(f"Não encontrei a categoria '{nome_categoria.capitalize()}'.")
             conn.close()
             return
-
         categoria_id = categoria[0]
         cursor.execute("DELETE FROM orcamentos WHERE id_usuario = ? AND id_categoria = ?", (user_id, categoria_id))
-        
         if cursor.rowcount > 0:
             conn.commit()
             await update.message.reply_text(f"✅ Orçamento para '{nome_categoria.capitalize()}' removido.")
         else:
             await update.message.reply_text(f"Você não tinha um orçamento definido para '{nome_categoria.capitalize()}'.")
-        
         conn.close()
-
     except (IndexError, ValueError):
         await update.message.reply_text("Formato inválido! Use: `/del_orcamento <categoria>`")
 
@@ -390,7 +367,7 @@ async def exportar_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_document(chat_id=update.effective_chat.id, document=data_bytes, filename=file_name, caption="Aqui está o seu relatório de transações do mês.")
 
 # --- Módulo de Transações (com Conversa e Inteligência) ---
-AGUARDANDO_PAGAMENTO, AGUARDANDO_SUGESTAO_CATEGORIA = range(10, 12)
+AGUARDANDO_PAGAMENTO, AGUARDANDO_SUGESTAO_CATEGORIA = range(10, 12) 
 async def iniciar_processo_transacao(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text
     padrao = re.compile(r'^([+\-])\s*(\d+(?:[.,]\d{1,2})?)\s*(.*)$'); match = padrao.match(texto)
@@ -435,7 +412,7 @@ async def tratar_sugestao_categoria(update: Update, context: ContextTypes.DEFAUL
     
     if query.data == 'sugestao_sim':
         nome_categoria_correta = dados_sugestao['sugestao']
-    else: # sugestao_nao
+    else: 
         nome_categoria_correta = dados_sugestao['categoria_errada']
 
     await query.edit_message_text(f"Ok, usando a categoria '{nome_categoria_correta.capitalize()}'...")
