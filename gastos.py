@@ -23,8 +23,13 @@ from telegram.ext import (
 )
 
 # --- Configuração da Base de Dados ---
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(SCRIPT_DIR, "gastos_bot.db")
+# Aponta para a pasta /data, que é o nosso Disco Persistente no Render
+DATA_DIR = '/data'
+DB_PATH = os.path.join(DATA_DIR, "gastos_bot.db")
+
+# Garante que o diretório de dados exista
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR)
 
 def inicializar_db():
     conn = sqlite3.connect(DB_PATH)
