@@ -59,11 +59,10 @@ def gerar_grafico_pizza(gastos_por_categoria):
     plt.title('Distribuição de Gastos do Período', pad=20); buf = io.BytesIO(); plt.savefig(buf, format='png', bbox_inches='tight'); plt.close(fig); buf.seek(0)
     return buf
 
-# --- Comandos Principais ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     telegram_id = user.id
-    chat_id = update.message.chat_id  # Captura o chat_id
+    chat_id = update.message.chat_id
     user_id_local = get_user_id(telegram_id)
     
     reply_keyboard = [
@@ -78,7 +77,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor = conn.cursor()
 
     if not user_id_local:
-        # Mensagem e lógica para novos usuários
+        # --- LÓGICA PARA NOVOS USUÁRIOS ---
         data_criacao_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         cursor.execute("INSERT INTO usuarios (telegram_id, chat_id, nome_usuario, data_criacao, dias_sequencia) VALUES (?, ?, ?, ?, ?)", 
                        (telegram_id, chat_id, user.username, data_criacao_str, 0))
@@ -93,8 +92,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(welcome_text, reply_markup=markup)
 
-        # ### NOVO: Onboarding Guiado ###
-        # Envia uma mensagem de acompanhamento sugerindo o próximo passo
         onboarding_text = (
             "Vamos começar? 🚀\n\n"
             "Que tal cadastrar seu primeiro cartão de crédito agora para facilitar os lançamentos?\n"
@@ -103,35 +100,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(onboarding_text, parse_mode='Markdown')
     else:
-        # Lógica para usuários existentes (combina resumo e gamificação)
+        # --- LÓGICA PARA USUÁRIOS EXISTENTES (CORRIGIDA E SEM DUPLICATAS) ---
         cursor.execute("UPDATE usuarios SET chat_id = ? WHERE telegram_id = ?", (chat_id, telegram_id))
         
-        # --- Busca os dados para a mensagem personalizada ---
-        
-        # 1. Busca os dados de sequência do usuário
+        # Busca os dados para a mensagem personalizada
         cursor.execute("SELECT dias_sequencia FROM usuarios WHERE id = ?", (user_id_local,))
         dias_sequencia = cursor.fetchone()[0] or 0
         
-        # 2. Busca o total de gastos do mês atual
         agora_utc = datetime.now(timezone.utc)
         inicio_mes_str = agora_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
         cursor.execute("SELECT SUM(valor) FROM transacoes WHERE id_usuario = ? AND tipo = 'saida' AND data_transacao >= ?", (user_id_local, inicio_mes_str))
         gastos_mes = cursor.fetchone()[0] or 0.0
         
-        # --- Monta a mensagem final ---
-        
+        # Monta a mensagem final unificada
         nome = user.first_name
         mensagem = f"Olá de volta, {nome}!\n\n"
-        
-        # Adiciona a informação sobre os gastos do mês
         mensagem += f"📊 Até agora, seus gastos este mês somam *R$ {gastos_mes:.2f}*.\n\n"
         
-        # Adiciona a mensagem de gamificação, se aplicável
         if dias_sequencia > 1:
             mensagem += f"Você está em uma sequência de *{dias_sequencia} dias* registrando tudo! Continue assim! 🔥"
         else:
             mensagem += "O que vamos organizar hoje?"
 
+        # Envia a mensagem unificada UMA ÚNICA VEZ
         await update.message.reply_text(mensagem, reply_markup=markup, parse_mode='Markdown')
     
     conn.commit()
