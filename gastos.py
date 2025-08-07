@@ -103,10 +103,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(onboarding_text, parse_mode='Markdown')
     else:
-        # Lógica para usuários existentes (apenas atualiza o chat_id se necessário)
+        # Lógica para usuários existentes (combina resumo e gamificação)
         cursor.execute("UPDATE usuarios SET chat_id = ? WHERE telegram_id = ?", (chat_id, telegram_id))
-        welcome_back_text = f"Olá de volta, {user.first_name}! O que vamos organizar hoje?"
-        await update.message.reply_text(welcome_back_text, reply_markup=markup)
+        
+        # --- Busca os dados para a mensagem personalizada ---
+        
+        # 1. Busca os dados de sequência do usuário
+        cursor.execute("SELECT dias_sequencia FROM usuarios WHERE id = ?", (user_id_local,))
+        dias_sequencia = cursor.fetchone()[0] or 0
+        
+        # 2. Busca o total de gastos do mês atual
+        agora_utc = datetime.now(timezone.utc)
+        inicio_mes_str = agora_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
+        cursor.execute("SELECT SUM(valor) FROM transacoes WHERE id_usuario = ? AND tipo = 'saida' AND data_transacao >= ?", (user_id_local, inicio_mes_str))
+        gastos_mes = cursor.fetchone()[0] or 0.0
+        
+        # --- Monta a mensagem final ---
+        
+        nome = user.first_name
+        mensagem = f"Olá de volta, {nome}!\n\n"
+        
+        # Adiciona a informação sobre os gastos do mês
+        mensagem += f"📊 Até agora, seus gastos este mês somam *R$ {gastos_mes:.2f}*.\n\n"
+        
+        # Adiciona a mensagem de gamificação, se aplicável
+        if dias_sequencia > 1:
+            mensagem += f"Você está em uma sequência de *{dias_sequencia} dias* registrando tudo! Continue assim! 🔥"
+        else:
+            mensagem += "O que vamos organizar hoje?"
+
+        await update.message.reply_text(mensagem, reply_markup=markup, parse_mode='Markdown')
     
     conn.commit()
     conn.close()
