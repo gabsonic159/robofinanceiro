@@ -193,9 +193,13 @@ async def del_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Módulo de Lembretes e Agendamentos ---
 async def menu_lembretes_e_agendamentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texto = ("Aqui pode configurar suas notificações:\n\n"
-             "☀️ *LEMBRETE DIÁRIO* (para registar gastos)\n`...`\n\n"
-             "🗓️ *AGENDADOR DE CONTAS* (registo automático)\n`...`")
+    texto = ("☀️ *LEMBRETE DIÁRIO* (para registrar gastos)\n"
+             "`/lembrete HH:MM`\n"
+             "`/cancelar_lembrete`\n\n"
+             "🗓️ *AGENDADOR DE CONTAS* (registro automático)\n"
+             "`/agendar <dia> <HH:MM> [valor] <título>`\n"
+             "`/ver_agendamentos`\n"
+             "`/cancelar_agendamento <título>`")
     await update.message.reply_text(texto, parse_mode='Markdown')
 
 # --- Módulo de Gestão de Cartões ---
@@ -552,6 +556,46 @@ def carregar_tarefas_agendadas(application: Application):
     print(f"Carregados {len(agendamentos)} agendamentos de contas.")
     conn.close()
 
+async def apagar_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    admin_id = os.getenv("ADMIN_TELEGRAM_ID")
+    if not admin_id or str(update.message.from_user.id) != admin_id:
+        await update.message.reply_text("Você não tem permissão para usar este comando.")
+        return
+
+    try:
+        target_telegram_id = int(context.args[0])
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        # Encontra o ID interno do usuário alvo
+        cursor.execute("SELECT id FROM usuarios WHERE telegram_id = ?", (target_telegram_id,))
+        user = cursor.fetchone()
+
+        if not user:
+            await update.message.reply_text(f"Usuário com ID do Telegram {target_telegram_id} não encontrado.")
+            conn.close()
+            return
+
+        id_interno = user[0]
+
+        # Apaga todos os dados em cascata
+        cursor.execute("DELETE FROM transacoes WHERE id_usuario = ?", (id_interno,))
+        cursor.execute("DELETE FROM orcamentos WHERE id_usuario = ?", (id_interno,))
+        cursor.execute("DELETE FROM cartoes WHERE id_usuario = ?", (id_interno,))
+        cursor.execute("DELETE FROM categorias WHERE id_usuario = ?", (id_interno,))
+        cursor.execute("DELETE FROM lembretes_diarios WHERE id_usuario = ?", (id_interno,))
+        cursor.execute("DELETE FROM agendamentos WHERE id_usuario = ?", (id_interno,))
+        cursor.execute("DELETE FROM usuarios WHERE id = ?", (id_interno,))
+
+        conn.commit()
+        conn.close()
+
+        await update.message.reply_text(f"Todos os dados do usuário com ID {target_telegram_id} foram apagados com sucesso.")
+
+    except (IndexError, ValueError):
+        await update.message.reply_text("Uso: /apagarusuario <ID do Telegram do usuário>")
+
+
 def main():
     inicializar_db()
     TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -607,7 +651,7 @@ def main():
     application.add_handler(CommandHandler("orcamento", set_orcamento))
     application.add_handler(CommandHandler("meus_orcamentos", list_orcamentos))
     application.add_handler(CommandHandler("del_orcamento", del_orcamento))
-
+    application.add_handler(CommandHandler("apagarusuario", apagar_usuario))
     application.add_handler(MessageHandler(filters.Regex('^🗂️ Categorias$'), list_categorias))
     application.add_handler(MessageHandler(filters.Regex('^💳 Cartões$'), menu_cartoes))
     application.add_handler(MessageHandler(filters.Regex('^💡 Ajuda$'), ajuda))
