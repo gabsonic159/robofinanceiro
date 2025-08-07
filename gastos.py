@@ -29,7 +29,8 @@ DB_PATH = os.path.join(SCRIPT_DIR, "gastos_bot.db")
 def inicializar_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('CREATE TABLE IF NOT EXISTS usuarios (id INTEGER PRIMARY KEY, telegram_id INTEGER UNIQUE, nome_usuario TEXT, data_criacao TEXT, ultimo_lancamento TEXT, dias_sequencia INTEGER DEFAULT 0)')
+    # ### MUDANÇA ###: Adicionada a coluna chat_id à tabela de usuários
+    cursor.execute('CREATE TABLE IF NOT EXISTS usuarios (id INTEGER PRIMARY KEY, telegram_id INTEGER UNIQUE, chat_id INTEGER, nome_usuario TEXT, data_criacao TEXT, ultimo_lancamento TEXT, dias_sequencia INTEGER DEFAULT 0)')
     cursor.execute('CREATE TABLE IF NOT EXISTS categorias (id INTEGER PRIMARY KEY, id_usuario INTEGER, nome TEXT, UNIQUE(id_usuario, nome), FOREIGN KEY (id_usuario) REFERENCES usuarios (id))')
     cursor.execute('CREATE TABLE IF NOT EXISTS cartoes (id INTEGER PRIMARY KEY AUTOINCREMENT, id_usuario INTEGER, nome TEXT, limite REAL, dia_fechamento INTEGER, UNIQUE(id_usuario, nome), FOREIGN KEY (id_usuario) REFERENCES usuarios(id))')
     cursor.execute('CREATE TABLE IF NOT EXISTS transacoes (id INTEGER PRIMARY KEY, id_usuario INTEGER, id_categoria INTEGER, valor REAL, tipo TEXT, data_transacao TEXT, id_cartao INTEGER, FOREIGN KEY (id_usuario) REFERENCES usuarios (id), FOREIGN KEY (id_categoria) REFERENCES categorias (id), FOREIGN KEY (id_cartao) REFERENCES cartoes(id))')
@@ -55,6 +56,56 @@ def gerar_grafico_pizza(gastos_por_categoria):
 
 # --- Comandos Principais ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    telegram_id = user.id
+    chat_id = update.message.chat_id  # Captura o chat_id
+    user_id_local = get_user_id(telegram_id)
+    
+    reply_keyboard = [
+        ["📊 Relatório", "💳 Cartões"], 
+        ["🗂️ Categorias", "💡 Ajuda"], 
+        ["⏰ Lembretes/Agendamentos", "⬇️ Exportar"],
+        ["🏠 Menu Principal"]
+    ]
+    markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    if not user_id_local:
+        # Mensagem e lógica para novos usuários
+        data_criacao_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        cursor.execute("INSERT INTO usuarios (telegram_id, chat_id, nome_usuario, data_criacao, dias_sequencia) VALUES (?, ?, ?, ?, ?)", 
+                       (telegram_id, chat_id, user.username, data_criacao_str, 0))
+        
+        welcome_text = (
+            f"Olá, {user.first_name}! 👋 Seja muito bem-vindo(a) ao seu novo Assistente Financeiro.\n\n"
+            "Estou aqui para te ajudar a ter um controle total sobre suas finanças de forma simples e rápida.\n\n"
+            "Para começar, é muito fácil:\n"
+            "➡️ **Registre um gasto:** `-50 mercado`\n"
+            "➡️ **Registre uma receita:** `+1000 salário`\n\n"
+            "Use os botões abaixo para explorar todas as funcionalidades. Qualquer dúvida, clique em '💡 Ajuda'."
+        )
+        await update.message.reply_text(welcome_text, reply_markup=markup)
+
+        # ### NOVO: Onboarding Guiado ###
+        # Envia uma mensagem de acompanhamento sugerindo o próximo passo
+        onboarding_text = (
+            "Vamos começar? 🚀\n\n"
+            "Que tal cadastrar seu primeiro cartão de crédito agora para facilitar os lançamentos?\n"
+            "É só usar o comando: `/add_cartao <Nome> <Limite> <Dia do Fechamento>`\n\n"
+            "*Exemplo:* `/add_cartao Nubank 1500 28`"
+        )
+        await update.message.reply_text(onboarding_text, parse_mode='Markdown')
+    else:
+        # Lógica para usuários existentes (apenas atualiza o chat_id se necessário)
+        cursor.execute("UPDATE usuarios SET chat_id = ? WHERE telegram_id = ?", (chat_id, telegram_id))
+        welcome_back_text = f"Olá de volta, {user.first_name}! O que vamos organizar hoje?"
+        await update.message.reply_text(welcome_back_text, reply_markup=markup)
+    
+    conn.commit()
+    conn.close()
+
     user = update.message.from_user
     telegram_id = user.id
     user_id_local = get_user_id(telegram_id)
@@ -596,6 +647,73 @@ async def apagar_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Uso: /apagarusuario <ID do Telegram do usuário>")
 
 
+# ### NOVO: Módulo de Insights Proativos ###
+
+async def enviar_insight_semanal(context: ContextTypes.DEFAULT_TYPE):
+    """Calcula e envia o insight da semana para um usuário específico."""
+    job_data = context.job.data
+    user_id = job_data["user_id"]
+    chat_id = job_data["chat_id"]
+    
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Calcula a data de 7 dias atrás
+    sete_dias_atras = (datetime.now(timezone.utc) - timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S')
+    
+    # Query para encontrar a categoria com maior gasto na última semana
+    cursor.execute("""
+        SELECT c.nome, SUM(t.valor) as total_gasto
+        FROM transacoes t
+        JOIN categorias c ON t.id_categoria = c.id
+        WHERE t.id_usuario = ? AND t.tipo = 'saida' AND t.data_transacao >= ?
+        GROUP BY c.nome
+        ORDER BY total_gasto DESC
+        LIMIT 1
+    """, (user_id, sete_dias_atras))
+    
+    maior_gasto = cursor.fetchone()
+    conn.close()
+    
+    if maior_gasto:
+        nome_categoria, total_gasto = maior_gasto
+        mensagem = (
+            f"💡 *Seu Insight da Semana!*\n\n"
+            f"Nos últimos 7 dias, sua maior categoria de gastos foi *{nome_categoria.capitalize()}*, "
+            f"totalizando *R$ {total_gasto:.2f}*.\n\n"
+            f"Continue registrando para mais insights! 😉"
+        )
+        await context.bot.send_message(chat_id=chat_id, text=mensagem, parse_mode='Markdown')
+
+def agendar_insights_semanais(application: Application):
+    """Agenda o envio de insights semanais para todos os usuários."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, chat_id FROM usuarios WHERE chat_id IS NOT NULL")
+    usuarios = cursor.fetchall()
+    conn.close()
+
+    # Define o horário para o envio (ex: toda segunda-feira às 10:00 da manhã)
+    fuso_horario = pytz.timezone('America/Sao_Paulo')
+    horario_envio = time(10, 0, tzinfo=fuso_horario)
+    
+    for user_id, chat_id in usuarios:
+        job_name = f"insight_semanal_{user_id}"
+        # Remove qualquer job antigo com o mesmo nome para evitar duplicatas
+        for job in application.job_queue.get_jobs_by_name(job_name):
+            job.schedule_removal()
+            
+        # Agenda o novo job para rodar toda segunda-feira (days=(0,))
+        application.job_queue.run_daily(
+            enviar_insight_semanal,
+            time=horario_envio,
+            days=(0,),  # 0 = Segunda-feira
+            chat_id=chat_id,
+            name=job_name,
+            data={"user_id": user_id, "chat_id": chat_id}
+        )
+    print(f"Agendados insights semanais para {len(usuarios)} usuários.")
+
 def main():
     inicializar_db()
     TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -605,7 +723,7 @@ def main():
     application = Application.builder().token(TOKEN).build()
     
     carregar_tarefas_agendadas(application)
-
+    agendar_insights_semanais(application)
     # --- Definição das Conversas ---
     transacao_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(r'^[+\-]\s*(\d+(?:[.,]\d{1,2})?)\s*(.*)'), iniciar_processo_transacao)],
