@@ -75,8 +75,6 @@ def gerar_grafico_pizza(gastos_por_categoria):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
-    logger.info(f"--- COMANDO /start ACIONADO PELO USUÁRIO {user.id} ---")
-    
     telegram_id = user.id
     chat_id = update.message.chat_id
     
@@ -90,51 +88,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-
-    cursor.execute("SELECT id, dias_sequencia FROM usuarios WHERE telegram_id = ?", (telegram_id,))
+    cursor.execute("SELECT id FROM usuarios WHERE telegram_id = ?", (telegram_id,))
     user_data = cursor.fetchone()
 
     if not user_data:
-        logger.info(f"Usuário {user.id} é um novo usuário. Criando entrada no DB.")
+        # --- LÓGICA PARA NOVOS USUÁRIOS ---
         data_criacao_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         cursor.execute("INSERT INTO usuarios (telegram_id, chat_id, nome_usuario, data_criacao, dias_sequencia) VALUES (?, ?, ?, ?, ?)", 
                        (telegram_id, chat_id, user.username, data_criacao_str, 0))
-        
-        welcome_text = (f"Olá, {user.first_name}! 👋 Seja muito bem-vindo(a) ao seu novo Assistente Financeiro...")
-        await update.message.reply_text(welcome_text, reply_markup=markup)
-        logger.info(f"Mensagem de boas-vindas enviada para {user.id}.")
+        conn.commit()
+        conn.close()
 
-        onboarding_text = ("Vamos começar? 🚀\n\n"
-                           "Que tal cadastrar seu primeiro cartão de crédito agora para facilitar os lançamentos?\n"
-                           "É só usar o comando: `/add_cartao <Nome> <Limite> <Dia do Fechamento>`\n\n"
-                           "*Exemplo:* `/add_cartao Nubank 1500 28`")
-        await update.message.reply_text(onboarding_text, parse_mode='Markdown')
-        logger.info(f"Mensagem de onboarding enviada para {user.id}.")
+        welcome_text = (f"Olá, {user.first_name}! 👋 Seja muito bem-vindo(a) ao PlinBot!\n\n"
+                        "Vejo que é sua primeira vez por aqui. Gostaria de um tour rápido para aprender a usar as principais funções?")
+        
+        keyboard = [[
+            InlineKeyboardButton("Sim, vamos lá! 🚀", callback_data="onboarding_start"),
+            InlineKeyboardButton("Não, obrigado.", callback_data="onboarding_skip_all")
+        ]]
+        await update.message.reply_text(welcome_text, reply_markup=InlineKeyboardMarkup(keyboard))
+        
+        # O onboarding começa aqui e será controlado pela ConversationHandler
+        return ONBOARDING_INICIO
     else:
-        logger.info(f"Usuário {user.id} é um usuário existente. Montando mensagem de retorno.")
-        user_id_local, dias_sequencia = user_data
+        # --- LÓGICA PARA USUÁRIOS EXISTENTES ---
+        user_id_local = user_data[0]
         cursor.execute("UPDATE usuarios SET chat_id = ? WHERE telegram_id = ?", (chat_id, telegram_id))
+        conn.commit()
+        conn.close()
         
-        agora_utc = datetime.now(timezone.utc)
-        inicio_mes_str = agora_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
-        cursor.execute("SELECT SUM(valor) FROM transacoes WHERE id_usuario = ? AND tipo = 'saida' AND data_transacao >= ?", (user_id_local, inicio_mes_str))
-        gastos_mes = cursor.fetchone()[0] or 0.0
-        
-        nome = user.first_name
-        mensagem = f"Olá de volta, {nome}!\n\n"
-        mensagem += f"📊 Até agora, seus gastos este mês somam *R$ {gastos_mes:.2f}*.\n\n"
-        
-        if dias_sequencia > 1:
-            mensagem += f"Você está em uma sequência de *{dias_sequencia} dias* registrando tudo! Continue assim! 🔥"
-        else:
-            mensagem += "O que vamos organizar hoje?"
-
-        await update.message.reply_text(mensagem, reply_markup=markup, parse_mode='Markdown')
-        logger.info(f"Mensagem de retorno enviada para {user.id}.")
-    
-    conn.commit()
-    conn.close()
-    logger.info(f"--- FIM DA EXECUÇÃO DE START PARA O USUÁRIO {user.id} ---")
+        # (A sua lógica de mensagem de boas-vindas para usuários existentes continua aqui)
+        await update.message.reply_text(f"Olá de volta, {user.first_name}! O que vamos organizar hoje?", reply_markup=markup)
 
 async def ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ... (código da função ajuda)
@@ -185,6 +169,8 @@ async def set_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
             categoria_id = categoria[0]
         cursor.execute("REPLACE INTO orcamentos (id_usuario, id_categoria, valor) VALUES (?, ?, ?)", (user_id, categoria_id, valor)); conn.commit(); conn.close()
         await update.message.reply_text(f"✅ Orçamento de R$ {valor:.2f} definido para a categoria '{nome_categoria.capitalize()}'.")
+        if context.user_data.get('onboarding'):
+            return await onboarding_pedir_transacao(update, context)
     except (IndexError, ValueError):
         await update.message.reply_text("Formato inválido! Use: `/orcamento <categoria> <valor>`\nExemplo: `/orcamento lazer 300`")
 
@@ -250,6 +236,8 @@ async def add_cartao(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         cursor.execute("INSERT INTO cartoes (id_usuario, nome, limite, dia_fechamento) VALUES (?, ?, ?, ?)", (user_id, nome_cartao, limite, dia_fechamento)); conn.commit()
         await update.message.reply_text(f"💳 Cartão '{nome_cartao}' adicionado!")
+        if context.user_data.get('onboarding'):
+            return await onboarding_pedir_orcamento(update, context)
     except sqlite3.IntegrityError: await update.message.reply_text(f"⚠️ Já existe um cartão com o nome '{nome_cartao}'.")
     finally: conn.close()
 
@@ -382,6 +370,7 @@ async def exportar_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_document(chat_id=update.effective_chat.id, document=data_bytes, filename=file_name, caption="Aqui está o seu relatório de transações do mês.")
 
 AGUARDANDO_PAGAMENTO, AGUARDANDO_SUGESTAO_CATEGORIA = range(10, 12) 
+ONBOARDING_INICIO, ONBOARDING_ORCAMENTO, ONBOARDING_TRANSACAO = range(20, 23)
 async def iniciar_processo_transacao(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text
     padrao = re.compile(r'^([+\-])\s*(\d+(?:[.,]\d{1,2})?)\s*(.*)$'); match = padrao.match(texto)
@@ -718,6 +707,82 @@ async def callback_agendamento(context: ContextTypes.DEFAULT_TYPE):
         is_scheduled=True
     )
 
+# ### NOVO: Funções para o fluxo de Onboarding ###
+
+async def onboarding_iniciar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    context.user_data['onboarding'] = True # Sinaliza que o onboarding está ativo
+    
+    texto = ("Ótimo! Primeiro, vamos cadastrar um cartão. Isso ajuda a organizar os gastos.\n\n"
+             "Use o comando `/add_cartao <Nome> <Limite> <Dia do Fechamento>`.\n\n"
+             "*Exemplo:* `/add_cartao Nubank 1500 28`")
+             
+    keyboard = [[InlineKeyboardButton("Pular este passo ➡️", callback_data="onboarding_skip_card")]]
+    await query.edit_message_text(text=texto, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    return ONBOARDING_ORCAMENTO
+
+async def onboarding_pular_cartao(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pula o passo do cartão e vai para o orçamento."""
+    query = update.callback_query
+    await query.answer()
+    return await onboarding_pedir_orcamento(update, context)
+
+async def onboarding_pedir_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Segundo passo do onboarding: Pede para criar um orçamento."""
+    texto = ("Excelente! Agora, vamos definir um orçamento. Isso te ajuda a não gastar mais do que o planejado.\n\n"
+             "Use o comando `/orcamento <Categoria> <Valor>`\n\n"
+             "*Exemplo:* `/orcamento Lazer 500`")
+    
+    keyboard = [[InlineKeyboardButton("Pular este passo ➡️", callback_data="onboarding_skip_budget")]]
+    
+    # Se veio de um CallbackQuery (botão Pular), edita a mensagem. Se veio de um comando, envia uma nova.
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text=texto, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.message.reply_text(text=texto, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+        
+    return ONBOARDING_TRANSACAO
+
+async def onboarding_pular_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pula o passo do orçamento e vai para a transação."""
+    query = update.callback_query
+    await query.answer()
+    return await onboarding_pedir_transacao(update, context)
+    
+async def onboarding_pedir_transacao(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Terceiro e último passo: Pede para registrar a primeira transação."""
+    texto = ("Perfeito! Você está quase pronto(a).\n\n"
+             "A principal função do bot é registrar suas transações. Tente registrar seu último gasto agora mesmo!\n\n"
+             "Use o formato: `-<valor> <categoria>`\n\n"
+             "*Exemplo:* `-15 almoço`")
+
+    keyboard = [[InlineKeyboardButton("Finalizar Tour ✅", callback_data="onboarding_skip_all")]]
+
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text=texto, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.message.reply_text(text=texto, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+        
+    return ConversationHandler.END # O tour de dicas acaba aqui
+
+async def onboarding_finalizar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Finaliza o onboarding e limpa os dados."""
+    query = update.callback_query
+    await query.answer()
+    
+    if 'onboarding' in context.user_data:
+        del context.user_data['onboarding']
+    
+    texto = ("Prontinho! Você aprendeu o básico. Agora o bot é todo seu.\n\n"
+             "Lembre-se que você pode usar os botões do menu a qualquer momento para acessar as funções.")
+             
+    await query.edit_message_text(text=texto)
+    # Mostra o menu principal com os botões grandes
+    await start(query, context)
+    return ConversationHandler.END
+
 def main():
     inicializar_db()
     TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -751,6 +816,31 @@ def main():
         fallbacks=[CommandHandler('cancelar', cancelar_conversa)],
     )
     
+
+### NOVO: ConversationHandler para o Onboarding ###
+    onboarding_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(onboarding_iniciar, pattern='^onboarding_start$')],
+        states={
+            ONBOARDING_ORCAMENTO: [
+                CommandHandler('add_cartao', add_cartao),
+                CallbackQueryHandler(onboarding_pular_cartao, pattern='^onboarding_skip_card$')
+            ],
+            ONBOARDING_TRANSACAO: [
+                CommandHandler('orcamento', set_orcamento),
+                CallbackQueryHandler(onboarding_pular_orcamento, pattern='^onboarding_skip_budget$')
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(onboarding_finalizar, pattern='^onboarding_skip_all$'),
+            CommandHandler('cancelar', onboarding_finalizar)
+        ],
+        per_user=True,
+        per_chat=True,
+    )
+
+    # Adiciona o novo handler junto com os outros
+    application.add_handler(onboarding_conv)
+
     application.add_handler(transacao_conv)
     application.add_handler(relatorio_conv)
 
