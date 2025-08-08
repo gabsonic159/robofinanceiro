@@ -5,7 +5,7 @@ import json
 import io
 import csv
 import random
-import logging  # <-- NOVO: Importa o sistema de logs
+import logging
 import matplotlib.pyplot as plt
 from datetime import datetime, time, timezone, timedelta
 from dateutil.relativedelta import relativedelta
@@ -27,22 +27,22 @@ from telegram.ext import (
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
-# Silencia logs desnecessários da biblioteca HTTP
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
+# --- Estados das Conversas ---
+ESCOLHER_PERIODO, AGUARDANDO_DATA_INICIO, AGUARDANDO_DATA_FIM = range(3)
+AGUARDANDO_PAGAMENTO, AGUARDANDO_SUGESTAO_CATEGORIA = range(10, 12)
+ONBOARDING_INICIO, ONBOARDING_ORCAMENTO, ONBOARDING_TRANSACAO = range(20, 23)
 
 # --- Configuração da Base de Dados ---
-# Aponta para a pasta /data, que é o nosso Disco Persistente no Render
 DATA_DIR = '/data'
 DB_PATH = os.path.join(DATA_DIR, "gastos_bot.db")
 
-# Garante que o diretório de dados exista
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
 def inicializar_db():
-    # ... (O resto do seu código, sem nenhuma alteração)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('CREATE TABLE IF NOT EXISTS usuarios (id INTEGER PRIMARY KEY, telegram_id INTEGER UNIQUE, chat_id INTEGER, nome_usuario TEXT, data_criacao TEXT, ultimo_lancamento TEXT, dias_sequencia INTEGER DEFAULT 0)')
@@ -61,10 +61,6 @@ def get_user_id(telegram_id):
     cursor.execute("SELECT id FROM usuarios WHERE telegram_id = ?", (telegram_id,)); user = cursor.fetchone(); conn.close()
     return user[0] if user else None
 
-# (COLE AQUI O RESTO DE TODAS AS SUAS FUNÇÕES, DESDE gerar_grafico_pizza ATÉ A ÚLTIMA ANTES DE main)
-# ...
-# ... (PARA EVITAR ERROS, EU COLEI PARA VOCÊ ABAIXO)
-
 def gerar_grafico_pizza(gastos_por_categoria):
     if not gastos_por_categoria: return None
     labels = [item[0].capitalize() for item in gastos_por_categoria]; sizes = [item[1] for item in gastos_por_categoria]
@@ -73,26 +69,18 @@ def gerar_grafico_pizza(gastos_por_categoria):
     plt.title('Distribuição de Gastos do Período', pad=20); buf = io.BytesIO(); plt.savefig(buf, format='png', bbox_inches='tight'); plt.close(fig); buf.seek(0)
     return buf
 
+# --- Comandos Principais e Onboarding ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
+    user = update.effective_user
     telegram_id = user.id
-    chat_id = update.message.chat_id
+    chat_id = update.effective_chat.id
     
-    reply_keyboard = [
-        ["📊 Relatório", "💳 Cartões"], 
-        ["🗂️ Categorias", "💡 Ajuda"], 
-        ["⏰ Lembretes/Agendamentos", "⬇️ Exportar"],
-        ["🏠 Menu Principal"]
-    ]
-    markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
-
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT id FROM usuarios WHERE telegram_id = ?", (telegram_id,))
+    cursor.execute("SELECT id, dias_sequencia FROM usuarios WHERE telegram_id = ?", (telegram_id,))
     user_data = cursor.fetchone()
 
     if not user_data:
-        # --- LÓGICA PARA NOVOS USUÁRIOS ---
         data_criacao_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         cursor.execute("INSERT INTO usuarios (telegram_id, chat_id, nome_usuario, data_criacao, dias_sequencia) VALUES (?, ?, ?, ?, ?)", 
                        (telegram_id, chat_id, user.username, data_criacao_str, 0))
@@ -106,22 +94,97 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("Sim, vamos lá! 🚀", callback_data="onboarding_start"),
             InlineKeyboardButton("Não, obrigado.", callback_data="onboarding_skip_all")
         ]]
-        await update.message.reply_text(welcome_text, reply_markup=InlineKeyboardMarkup(keyboard))
-        
-        # O onboarding começa aqui e será controlado pela ConversationHandler
+        await update.effective_message.reply_text(welcome_text, reply_markup=InlineKeyboardMarkup(keyboard))
         return ONBOARDING_INICIO
     else:
-        # --- LÓGICA PARA USUÁRIOS EXISTENTES ---
-        user_id_local = user_data[0]
+        user_id_local, dias_sequencia = user_data
         cursor.execute("UPDATE usuarios SET chat_id = ? WHERE telegram_id = ?", (chat_id, telegram_id))
         conn.commit()
         conn.close()
         
-        # (A sua lógica de mensagem de boas-vindas para usuários existentes continua aqui)
-        await update.message.reply_text(f"Olá de volta, {user.first_name}! O que vamos organizar hoje?", reply_markup=markup)
+        reply_keyboard = [
+            ["📊 Relatório", "💳 Cartões"], 
+            ["🗂️ Categorias", "💡 Ajuda"], 
+            ["⏰ Lembretes/Agendamentos", "⬇️ Exportar"],
+            ["🏠 Menu Principal"]
+        ]
+        markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
+        
+        agora_utc = datetime.now(timezone.utc)
+        inicio_mes_str = agora_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("SELECT SUM(valor) FROM transacoes WHERE id_usuario = ? AND tipo = 'saida' AND data_transacao >= ?", (user_id_local, inicio_mes_str))
+        gastos_mes = cursor.fetchone()[0] or 0.0
+        conn.close()
+        
+        nome = user.first_name
+        mensagem = f"Olá de volta, {nome}!\n\n"
+        mensagem += f"📊 Até agora, seus gastos este mês somam *R$ {gastos_mes:.2f}*.\n\n"
+        
+        if dias_sequencia > 1:
+            mensagem += f"Você está em uma sequência de *{dias_sequencia} dias* registrando tudo! Continue assim! 🔥"
+        else:
+            mensagem += "O que vamos organizar hoje?"
+
+        await update.effective_message.reply_text(mensagem, reply_markup=markup, parse_mode='Markdown')
+        return ConversationHandler.END
+
+async def onboarding_iniciar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data['onboarding'] = True
+    texto = ("Ótimo! Primeiro, vamos cadastrar um cartão. Isso ajuda a organizar os gastos.\n\n"
+             "Use o comando `/add_cartao <Nome> <Limite> <Dia do Fechamento>`.\n\n"
+             "*Exemplo:* `/add_cartao Nubank 1500 28`")
+    keyboard = [[InlineKeyboardButton("Pular este passo ➡️", callback_data="onboarding_skip_card")]]
+    await query.edit_message_text(text=texto, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    return ONBOARDING_ORCAMENTO
+
+async def onboarding_pular_cartao(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    return await onboarding_pedir_orcamento(update, context)
+
+async def onboarding_pedir_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    texto = ("Excelente! Agora, vamos definir um orçamento. Isso te ajuda a não gastar mais do que o planejado.\n\n"
+             "Use o comando `/orcamento <Categoria> <Valor>`\n\n"
+             "*Exemplo:* `/orcamento Lazer 500`")
+    keyboard = [[InlineKeyboardButton("Pular este passo ➡️", callback_data="onboarding_skip_budget")]]
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text=texto, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.effective_message.reply_text(text=texto, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    return ONBOARDING_TRANSACAO
+
+async def onboarding_pular_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    return await onboarding_pedir_transacao(update, context)
+    
+async def onboarding_pedir_transacao(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    texto = ("Perfeito! Você está quase pronto(a).\n\n"
+             "A principal função do bot é registrar suas transações. Tente registrar seu último gasto agora mesmo!\n\n"
+             "Use o formato: `-<valor> <categoria>`\n\n"
+             "*Exemplo:* `-15 almoço`")
+    keyboard = [[InlineKeyboardButton("Finalizar Tour ✅", callback_data="onboarding_skip_all")]]
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text=texto, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.effective_message.reply_text(text=texto, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    return ONBOARDING_TRANSACAO
+
+async def onboarding_finalizar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if 'onboarding' in context.user_data:
+        del context.user_data['onboarding']
+    texto = ("Prontinho! Você aprendeu o básico. Agora o bot é todo seu.\n\n"
+             "Lembre-se que você pode usar os botões do menu a qualquer momento para acessar as funções.")
+    await query.edit_message_text(text=texto)
+    await start(update, context)
+    return ConversationHandler.END
 
 async def ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (código da função ajuda)
     texto_ajuda = (
         "🤖 *Comandos e Funções*\n\n"
         "Para registrar uma transação, basta enviar uma mensagem no formato:\n"
@@ -143,17 +206,26 @@ async def ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  `/relatorio`\n"
         "  `/exportar`"
     )
-    await update.message.reply_text(texto_ajuda, parse_mode='Markdown')
+    await update.effective_message.reply_text(texto_ajuda, parse_mode='Markdown')
+
+async def add_cartao(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = get_user_id(update.effective_user.id)
+    try:
+        nome_cartao = context.args[0].capitalize(); limite = float(context.args[1].replace(',', '.')); dia_fechamento = int(context.args[2])
+        if not (1 <= dia_fechamento <= 31 and limite > 0): raise ValueError()
+    except (IndexError, ValueError): await update.effective_message.reply_text("Formato inválido! Use: `/add_cartao <nome> <limite> <dia_fecha>`"); return
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO cartoes (id_usuario, nome, limite, dia_fechamento) VALUES (?, ?, ?, ?)", (user_id, nome_cartao, limite, dia_fechamento)); conn.commit()
+        await update.effective_message.reply_text(f"💳 Cartão '{nome_cartao}' adicionado!")
+    except sqlite3.IntegrityError: await update.effective_message.reply_text(f"⚠️ Já existe um cartão com o nome '{nome_cartao}'.")
+    finally: conn.close()
     
-# (COLE AQUI TODAS AS SUAS OUTRAS FUNÇÕES: set_orcamento, list_orcamentos, etc... até a função apagar_usuario)
-# ...
-
-# (FUNÇÃO main() NO FINAL DO ARQUIVO)
-
-# --- INÍCIO DAS FUNÇÕES RESTANTES ---
+    if context.user_data.get('onboarding'):
+        return await onboarding_pedir_orcamento(update, context)
 
 async def set_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = get_user_id(update.message.from_user.id)
+    user_id = get_user_id(update.effective_user.id)
     try:
         args = context.args
         valor = float(args[-1].replace(',', '.'))
@@ -168,11 +240,14 @@ async def set_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             categoria_id = categoria[0]
         cursor.execute("REPLACE INTO orcamentos (id_usuario, id_categoria, valor) VALUES (?, ?, ?)", (user_id, categoria_id, valor)); conn.commit(); conn.close()
-        await update.message.reply_text(f"✅ Orçamento de R$ {valor:.2f} definido para a categoria '{nome_categoria.capitalize()}'.")
-        if context.user_data.get('onboarding'):
-            return await onboarding_pedir_transacao(update, context)
+        await update.effective_message.reply_text(f"✅ Orçamento de R$ {valor:.2f} definido para a categoria '{nome_categoria.capitalize()}'.")
     except (IndexError, ValueError):
-        await update.message.reply_text("Formato inválido! Use: `/orcamento <categoria> <valor>`\nExemplo: `/orcamento lazer 300`")
+        await update.effective_message.reply_text("Formato inválido! Use: `/orcamento <categoria> <valor>`\nExemplo: `/orcamento lazer 300`")
+
+    if context.user_data.get('onboarding'):
+        return await onboarding_pedir_transacao(update, context)
+
+# --- (Aqui entram todas as outras funções que você já tem: list_orcamentos, del_orcamento, menu_cartoes, etc... até 'apagar_usuario') ---
 
 async def list_orcamentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = get_user_id(update.message.from_user.id)
@@ -783,6 +858,7 @@ async def onboarding_finalizar(update: Update, context: ContextTypes.DEFAULT_TYP
     await start(query, context)
     return ConversationHandler.END
 
+# --- Função 'main' e Registro de Handlers ---
 def main():
     inicializar_db()
     TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -809,45 +885,26 @@ def main():
             ONBOARDING_TRANSACAO: [
                 CommandHandler('orcamento', set_orcamento),
                 CallbackQueryHandler(onboarding_pular_orcamento, pattern='^onboarding_skip_budget$'),
-                # ### CORREÇÃO AQUI ###
-                # Adicionamos o handler para o botão de finalizar neste estado.
                 CallbackQueryHandler(onboarding_finalizar, pattern='^onboarding_skip_all$')
             ],
         },
-        fallbacks=[
-            CommandHandler('start', start) # Permite que o usuário reinicie
-        ],
+        fallbacks=[CommandHandler('start', start)],
+        per_user=True,
+        per_chat=True,
     )
     
-    transacao_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex(r'^[+\-]\s*(\d+(?:[.,]\d{1,2})?)\s*(.*)'), iniciar_processo_transacao)],
-        states={
-            AGUARDANDO_PAGAMENTO: [CallbackQueryHandler(receber_forma_pagamento, pattern="^cartao:")],
-            AGUARDANDO_SUGESTAO_CATEGORIA: [CallbackQueryHandler(tratar_sugestao_categoria, pattern="^sugestao_")],
-        },
-        fallbacks=[CommandHandler('cancelar', cancelar_conversa)],
-    )
+    transacao_conv = ConversationHandler(...) # Sua transacao_conv
+    relatorio_conv = ConversationHandler(...) # Sua relatorio_conv
 
-    relatorio_conv = ConversationHandler(
-        entry_points=[
-            CommandHandler('relatorio', iniciar_relatorio),
-            MessageHandler(filters.Regex('^📊 Relatório$'), iniciar_relatorio)
-        ],
-        states={
-            ESCOLHER_PERIODO: [CallbackQueryHandler(processar_escolha_periodo, pattern="^rel_")],
-            AGUARDANDO_DATA_INICIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_inicio)],
-            AGUARDANDO_DATA_FIM: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_fim)],
-        },
-        fallbacks=[CommandHandler('cancelar', cancelar_conversa)],
-    )
-    
-    # --- Ordem de Adição Correta ---
-    # A conversa de Onboarding agora controla o comando /start
+    # --- Ordem de Adição dos Handlers ---
+    # O handler de /start agora é controlado pela conversa de onboarding
     application.add_handler(onboarding_conv)
     application.add_handler(transacao_conv)
     application.add_handler(relatorio_conv)
 
-    # Comandos que não fazem parte de conversas
+    # Handlers que não fazem parte de conversas
+    application.add_handler(transacao_conv)
+    application.add_handler(relatorio_conv)
     application.add_handler(CommandHandler("ajuda", ajuda))
     application.add_handler(CommandHandler("listarcategorias", list_categorias))
     application.add_handler(CommandHandler("del_categoria", del_categoria))
@@ -863,7 +920,9 @@ def main():
     application.add_handler(CommandHandler("meus_orcamentos", list_orcamentos))
     application.add_handler(CommandHandler("del_orcamento", del_orcamento))
     application.add_handler(CommandHandler("apagarusuario", apagar_usuario))
-
+    # ... Adicione todos os outros CommandHandlers (exceto o start) aqui
+    
+    # Handlers de Botões do Menu
     # Botões do menu que não são entry points
     application.add_handler(MessageHandler(filters.Regex('^🗂️ Categorias$'), list_categorias))
     application.add_handler(MessageHandler(filters.Regex('^💳 Cartões$'), menu_cartoes))
@@ -871,16 +930,14 @@ def main():
     application.add_handler(MessageHandler(filters.Regex('^⏰ Lembretes/Agendamentos$'), menu_lembretes_e_agendamentos))
     application.add_handler(MessageHandler(filters.Regex('^⬇️ Exportar$'), exportar_csv))
     application.add_handler(MessageHandler(filters.Regex('^🏠 Menu Principal$'), start))
+    # ... Adicione todos os outros MessageHandlers de botões aqui
     
-    # Outros handlers
-    application.add_handler(CallbackQueryHandler(desfazer_lancamento, pattern="^undo:"))
-    
-    # Fallback por último
+    # Handler de Fallback por último
     async def fallback_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("Não entendi. Para registar uma transação, use o formato `-valor categoria` ou `+valor categoria`.")
+        await update.effective_message.reply_text("Não entendi. Para registar uma transação, use o formato `-valor categoria` ou `+valor categoria`.")
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_text))
 
-    logger.info("Bot v21.1 (Correção Onboarding) iniciado!")
+    logger.info("Bot v22 (Onboarding Completo) iniciado!")
     application.run_polling()
 
 if __name__ == '__main__':
