@@ -63,7 +63,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     telegram_id = user.id
     chat_id = update.message.chat_id
-    user_id_local = get_user_id(telegram_id)
     
     reply_keyboard = [
         ["📊 Relatório", "💳 Cartões"], 
@@ -76,7 +75,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    if not user_id_local:
+    # Verifica se o usuário existe para decidir qual mensagem enviar
+    cursor.execute("SELECT id, dias_sequencia FROM usuarios WHERE telegram_id = ?", (telegram_id,))
+    user_data = cursor.fetchone()
+
+    if not user_data:
         # --- LÓGICA PARA NOVOS USUÁRIOS ---
         data_criacao_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         cursor.execute("INSERT INTO usuarios (telegram_id, chat_id, nome_usuario, data_criacao, dias_sequencia) VALUES (?, ?, ?, ?, ?)", 
@@ -100,19 +103,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(onboarding_text, parse_mode='Markdown')
     else:
-        # --- LÓGICA PARA USUÁRIOS EXISTENTES (CORRIGIDA E SEM DUPLICATAS) ---
+        # --- LÓGICA PARA USUÁRIOS EXISTENTES ---
+        user_id_local, dias_sequencia = user_data
         cursor.execute("UPDATE usuarios SET chat_id = ? WHERE telegram_id = ?", (chat_id, telegram_id))
-        
-        # Busca os dados para a mensagem personalizada
-        cursor.execute("SELECT dias_sequencia FROM usuarios WHERE id = ?", (user_id_local,))
-        dias_sequencia = cursor.fetchone()[0] or 0
         
         agora_utc = datetime.now(timezone.utc)
         inicio_mes_str = agora_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
         cursor.execute("SELECT SUM(valor) FROM transacoes WHERE id_usuario = ? AND tipo = 'saida' AND data_transacao >= ?", (user_id_local, inicio_mes_str))
         gastos_mes = cursor.fetchone()[0] or 0.0
         
-        # Monta a mensagem final unificada
         nome = user.first_name
         mensagem = f"Olá de volta, {nome}!\n\n"
         mensagem += f"📊 Até agora, seus gastos este mês somam *R$ {gastos_mes:.2f}*.\n\n"
@@ -122,7 +121,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             mensagem += "O que vamos organizar hoje?"
 
-        # Envia a mensagem unificada UMA ÚNICA VEZ
         await update.message.reply_text(mensagem, reply_markup=markup, parse_mode='Markdown')
     
     conn.commit()
