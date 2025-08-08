@@ -523,7 +523,9 @@ async def cancelar_lembrete_diario(update: Update, context: ContextTypes.DEFAULT
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor(); cursor.execute("DELETE FROM lembretes_diarios WHERE id_usuario = ?", (user_id,)); conn.commit(); conn.close()
     await update.message.reply_text("✅ Lembrete diário cancelado.")
 async def agendar_conta(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = get_user_id(update.message.from_user.id); chat_id = update.effective_chat.id; args = context.args
+    user_id = get_user_id(update.message.from_user.id)
+    chat_id = update.effective_chat.id
+    args = context.args
     try:
         if len(args) < 3: raise ValueError()
         dia = int(args[0]); horario_str = args[1]; valor = None
@@ -532,16 +534,49 @@ async def agendar_conta(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             titulo = " ".join(args[2:])
         if not (1 <= dia <= 31) or not titulo: raise ValueError()
-        hora, minuto = map(int, horario_str.split(':')); fuso_horario = pytz.timezone('America/Sao_Paulo'); horario_obj = time(hour=hora, minute=minuto, tzinfo=fuso_horario)
-    except (IndexError, ValueError): await update.message.reply_text("Uso: `/agendar <dia> <HH:MM> [valor] <título>`"); return
+        
+        hora, minuto = map(int, horario_str.split(':'))
+        fuso_horario = pytz.timezone('America/Sao_Paulo')
+        horario_obj = time(hour=hora, minute=minuto, tzinfo=fuso_horario)
+    except (IndexError, ValueError):
+        await update.message.reply_text("Uso: `/agendar <dia> <HH:MM> [valor] <título>`")
+        return
+
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-    cursor.execute("REPLACE INTO agendamentos (id_usuario, dia, horario, titulo, valor, chat_id) VALUES (?, ?, ?, ?, ?, ?)", (user_id, dia, horario_str, titulo, valor, chat_id)); id_agendamento = cursor.lastrowid; conn.commit(); conn.close()
+    cursor.execute("REPLACE INTO agendamentos (id_usuario, dia, horario, titulo, valor, chat_id) VALUES (?, ?, ?, ?, ?, ?)",
+                   (user_id, dia, horario_str, titulo.lower(), valor, chat_id))
+    id_agendamento = cursor.lastrowid
+    conn.commit(); conn.close()
+
     job_name = f"agendamento_{chat_id}_{id_agendamento}"
-    for job in context.application.job_queue.get_jobs_by_name(job_name): job.schedule_removal()
-    callback_func = registrar_transacao_final if valor is not None else (lambda ctx: ctx.bot.send_message(chat_id=ctx.job.chat_id, text=f"🗓️ Lembrete: Hora de pagar *{ctx.job.data['titulo']}*.", parse_mode='Markdown'))
-    context.application.job_queue.run_monthly(callback_func, when=horario_obj, day=dia, name=job_name, chat_id=chat_id, data={'user_id': user_id, 'nome_categoria': titulo, 'sinal': '-', 'valor_str': str(valor), 'is_scheduled': True, 'titulo': titulo})
-    if valor: await update.message.reply_text(f"✅ Despesa '{titulo}' de R$ {valor:.2f} agendada!")
-    else: await update.message.reply_text(f"✅ Lembrete para '{titulo}' agendado!")
+    for job in context.application.job_queue.get_jobs_by_name(job_name):
+        job.schedule_removal()
+
+    # ### CORREÇÃO AQUI ###
+    # Define qual função o agendador deve chamar
+    if valor:
+        callback_func = callback_agendamento  # Usa nosso novo "adaptador"
+    else:
+        # Se não houver valor, é apenas um lembrete
+        callback_func = (lambda ctx: ctx.bot.send_message(
+            chat_id=ctx.job.chat_id, 
+            text=f"🗓️ Lembrete: Hora de pagar *{ctx.job.data['titulo'].capitalize()}*.", 
+            parse_mode='Markdown'
+        ))
+    
+    context.application.job_queue.run_monthly(
+        callback_func,
+        when=horario_obj,
+        day=dia,
+        name=job_name,
+        chat_id=chat_id,
+        data={'user_id': user_id, 'nome_categoria': titulo.lower(), 'sinal': '-', 'valor_str': str(valor), 'titulo': titulo}
+    )
+    
+    if valor:
+        await update.message.reply_text(f"✅ Despesa '{titulo.capitalize()}' de R$ {valor:.2f} agendada para todo dia {dia} às {horario_str}!")
+    else:
+        await update.message.reply_text(f"✅ Lembrete para '{titulo.capitalize()}' agendado para todo dia {dia} às {horario_str}!")
 async def ver_agendamentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = get_user_id(update.message.from_user.id); conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT dia, horario, titulo, valor FROM agendamentos WHERE id_usuario = ? ORDER BY dia, horario", (user_id,)); agendamentos = cursor.fetchall(); conn.close()
@@ -657,6 +692,31 @@ def agendar_insights_semanais(application: Application):
             data={"user_id": user_id, "chat_id": chat_id}
         )
     print(f"Agendados insights semanais para {len(usuarios)} usuários.")
+
+# ### NOVO: Função "adaptadora" para o agendador de tarefas ###
+async def callback_agendamento(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Esta função é chamada pelo agendador. Ela extrai os dados do 'job'
+    e chama a função de registro de transação com os argumentos corretos.
+    """
+    job_data = context.job.data
+    
+    # Extrai os dados que salvamos ao criar o agendamento
+    user_id = job_data.get('user_id')
+    nome_categoria = job_data.get('nome_categoria')
+    sinal = job_data.get('sinal')
+    valor_str = job_data.get('valor_str')
+    
+    # Chama a função de registro original, passando os argumentos necessários
+    await registrar_transacao_final(
+        update=None,  # Não há 'update' de usuário em uma tarefa agendada
+        context=context,
+        user_id=user_id,
+        nome_categoria=nome_categoria,
+        sinal=sinal,
+        valor_str=valor_str,
+        is_scheduled=True
+    )
 
 def main():
     inicializar_db()
