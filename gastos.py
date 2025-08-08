@@ -765,7 +765,7 @@ async def onboarding_pedir_transacao(update: Update, context: ContextTypes.DEFAU
     else:
         await update.message.reply_text(text=texto, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
         
-    return ConversationHandler.END # O tour de dicas acaba aqui
+    return ONBOARDING_TRANSACAO
 
 async def onboarding_finalizar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Finaliza o onboarding e limpa os dados."""
@@ -787,12 +787,37 @@ def main():
     inicializar_db()
     TOKEN = os.getenv("TELEGRAM_TOKEN")
     if not TOKEN:
-        print("ERRO: A variável de ambiente TELEGRAM_TOKEN não foi definida.")
+        logger.error("ERRO: A variável de ambiente TELEGRAM_TOKEN não foi definida.")
         return
     application = Application.builder().token(TOKEN).build()
     
     carregar_tarefas_agendadas(application)
     agendar_insights_semanais(application)
+
+    # --- Definição das Conversas ---
+    onboarding_conv = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            ONBOARDING_INICIO: [
+                CallbackQueryHandler(onboarding_iniciar, pattern='^onboarding_start$'),
+                CallbackQueryHandler(onboarding_finalizar, pattern='^onboarding_skip_all$')
+            ],
+            ONBOARDING_ORCAMENTO: [
+                CommandHandler('add_cartao', add_cartao),
+                CallbackQueryHandler(onboarding_pular_cartao, pattern='^onboarding_skip_card$')
+            ],
+            ONBOARDING_TRANSACAO: [
+                CommandHandler('orcamento', set_orcamento),
+                CallbackQueryHandler(onboarding_pular_orcamento, pattern='^onboarding_skip_budget$'),
+                # ### CORREÇÃO AQUI ###
+                # Adicionamos o handler para o botão de finalizar neste estado.
+                CallbackQueryHandler(onboarding_finalizar, pattern='^onboarding_skip_all$')
+            ],
+        },
+        fallbacks=[
+            CommandHandler('start', start) # Permite que o usuário reinicie
+        ],
+    )
     
     transacao_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(r'^[+\-]\s*(\d+(?:[.,]\d{1,2})?)\s*(.*)'), iniciar_processo_transacao)],
@@ -816,53 +841,30 @@ def main():
         fallbacks=[CommandHandler('cancelar', cancelar_conversa)],
     )
     
-
-### NOVO: ConversationHandler para o Onboarding ###
-    onboarding_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(onboarding_iniciar, pattern='^onboarding_start$')],
-        states={
-            ONBOARDING_ORCAMENTO: [
-                CommandHandler('add_cartao', add_cartao),
-                CallbackQueryHandler(onboarding_pular_cartao, pattern='^onboarding_skip_card$')
-            ],
-            ONBOARDING_TRANSACAO: [
-                CommandHandler('orcamento', set_orcamento),
-                CallbackQueryHandler(onboarding_pular_orcamento, pattern='^onboarding_skip_budget$')
-            ],
-        },
-        fallbacks=[
-            CallbackQueryHandler(onboarding_finalizar, pattern='^onboarding_skip_all$'),
-            CommandHandler('cancelar', onboarding_finalizar)
-        ],
-        per_user=True,
-        per_chat=True,
-    )
-
-    # Adiciona o novo handler junto com os outros
+    # --- Ordem de Adição Correta ---
+    # A conversa de Onboarding agora controla o comando /start
     application.add_handler(onboarding_conv)
-
     application.add_handler(transacao_conv)
     application.add_handler(relatorio_conv)
 
-    application.add_handler(CommandHandler("start", start))
+    # Comandos que não fazem parte de conversas
     application.add_handler(CommandHandler("ajuda", ajuda))
     application.add_handler(CommandHandler("listarcategorias", list_categorias))
     application.add_handler(CommandHandler("del_categoria", del_categoria))
     application.add_handler(CommandHandler("exportar", exportar_csv))
-    application.add_handler(CommandHandler("add_cartao", add_cartao))
     application.add_handler(CommandHandler("list_cartoes", list_cartoes))
-    application.add_handler(CommandHandler("del_cartao", del_cartao))
     application.add_handler(CommandHandler("fatura", fatura))
+    application.add_handler(CommandHandler("del_cartao", del_cartao))
     application.add_handler(CommandHandler("lembrete", definir_lembrete_diario))
     application.add_handler(CommandHandler("cancelar_lembrete", cancelar_lembrete_diario))
     application.add_handler(CommandHandler("agendar", agendar_conta))
     application.add_handler(CommandHandler("ver_agendamentos", ver_agendamentos))
     application.add_handler(CommandHandler("cancelar_agendamento", cancelar_agendamento))
-    application.add_handler(CommandHandler("orcamento", set_orcamento))
     application.add_handler(CommandHandler("meus_orcamentos", list_orcamentos))
     application.add_handler(CommandHandler("del_orcamento", del_orcamento))
     application.add_handler(CommandHandler("apagarusuario", apagar_usuario))
 
+    # Botões do menu que não são entry points
     application.add_handler(MessageHandler(filters.Regex('^🗂️ Categorias$'), list_categorias))
     application.add_handler(MessageHandler(filters.Regex('^💳 Cartões$'), menu_cartoes))
     application.add_handler(MessageHandler(filters.Regex('^💡 Ajuda$'), ajuda))
@@ -870,13 +872,15 @@ def main():
     application.add_handler(MessageHandler(filters.Regex('^⬇️ Exportar$'), exportar_csv))
     application.add_handler(MessageHandler(filters.Regex('^🏠 Menu Principal$'), start))
     
+    # Outros handlers
     application.add_handler(CallbackQueryHandler(desfazer_lancamento, pattern="^undo:"))
     
+    # Fallback por último
     async def fallback_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Não entendi. Para registar uma transação, use o formato `-valor categoria` ou `+valor categoria`.")
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_text))
 
-    print("Bot v20 (Orçamentos na Base Estável) iniciado!")
+    logger.info("Bot v21.1 (Correção Onboarding) iniciado!")
     application.run_polling()
 
 if __name__ == '__main__':
