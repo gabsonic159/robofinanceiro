@@ -740,6 +740,7 @@ async def cancelar_agendamento(update: Update, context: ContextTypes.DEFAULT_TYP
     job_name = f"agendamento_{chat_id}_{id_agendamento}"
     for job in context.application.job_queue.get_jobs_by_name(job_name): job.schedule_removal()
     await update.effective_message.reply_text(f"✅ Agendamento '{titulo_para_remover.capitalize()}' cancelado.")
+
 def carregar_tarefas_agendadas(application: Application):
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor(); fuso_horario = pytz.timezone('America/Sao_Paulo')
     cursor.execute("SELECT horario, chat_id FROM lembretes_diarios")
