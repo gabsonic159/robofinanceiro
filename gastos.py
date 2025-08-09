@@ -638,31 +638,37 @@ async def registrar_transacao_final(update: Update, context: ContextTypes.DEFAUL
         await context.bot.send_message(chat_id=context.job.chat_id, text=f"✅ Gasto agendado de '{nome_categoria.capitalize()}' (R$ {valor:.2f}) foi registrado automaticamente.{mensagem_orcamento}", parse_mode='Markdown')
         return
     
-    respostas_possiveis = [f"✅ Anotado!", f"Ok, registrado! 👍", f"Prontinho!", f"Na conta! 📝"]
+     # --- Início da Lógica Corrigida ---
+
+    # 1. Monta a base da mensagem
+    respostas_possiveis = ["✅ Anotado!", "Ok, registrado! 👍", "Prontinho!", "Na conta! 📝"]
     mensagem = random.choice(respostas_possiveis)
     detalhes_msg = f"\n**Categoria:** {nome_categoria.capitalize()}\n**Valor:** R$ {valor:.2f}"
     
+    # 2. Adiciona detalhes do cartão, se houver
     if id_cartao:
-        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-        cursor.execute("SELECT nome FROM cartoes WHERE id = ?", (id_cartao,)); nome_cartao = cursor.fetchone()[0]; conn.close()
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT nome FROM cartoes WHERE id = ?", (id_cartao,))
+        nome_cartao = cursor.fetchone()[0]
+        conn.close()
         detalhes_msg += f"\n**Cartão:** {nome_cartao}"
         
-    mensagem += detalhes_msg + mensagem_sequencia + mensagem_orcamento
+    # 3. Compõe a mensagem final
+    mensagem_final = mensagem + detalhes_msg + mensagem_sequencia + mensagem_orcamento
+    
+    # 4. Cria o botão de desfazer
     keyboard = [[InlineKeyboardButton("↩️ Desfazer", callback_data=f"undo:{new_transaction_id}")]]
     
-    target_message = update.callback_query.message if (update and update.callback_query) else (update.message if update else None)
-    if target_message:
-        await target_message.reply_text(text=mensagem, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-    
-    if id_cartao:
-        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-        cursor.execute("SELECT nome FROM cartoes WHERE id = ?", (id_cartao,)); nome_cartao = cursor.fetchone()[0]; conn.close()
-        detalhes_msg += f"\n**Cartão:** {nome_cartao}"
-    mensagem += detalhes_msg + mensagem_sequencia + mensagem_orcamento
-    keyboard = [[InlineKeyboardButton("↩️ Desfazer", callback_data=f"undo:{new_transaction_id}")]]
-    
+    # 5. Envia a mensagem UMA ÚNICA VEZ
+    # Determina o alvo da resposta (se veio de um botão ou de uma mensagem direta)
     target_message = update.callback_query.message if update.callback_query else update.effective_message
-    await target_message.reply_text(text=mensagem, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    if target_message:
+        await target_message.reply_text(
+            text=mensagem_final, 
+            parse_mode='Markdown', 
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 async def desfazer_lancamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
