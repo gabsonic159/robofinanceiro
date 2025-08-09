@@ -171,7 +171,8 @@ async def onboarding_iniciar(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def onboarding_pular_cartao(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    return await onboarding_pedir_orcamento(update, context)
+    # Agora ele vai direto pedir para registrar a transação
+    return await onboarding_pedir_transacao(update, context)
 
 async def onboarding_pedir_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = ("Excelente! Agora, vamos definir um orçamento. Isso te ajuda a não gastar mais do que o planejado.\n\n"
@@ -203,12 +204,21 @@ async def onboarding_pedir_transacao(update: Update, context: ContextTypes.DEFAU
 
 async def onboarding_finalizar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    # Se a função foi chamada por um botão (query existe)
+    if query:
+        await query.answer()
+        
     if 'onboarding' in context.user_data:
         del context.user_data['onboarding']
+        
     texto = ("Prontinho! Você aprendeu o básico. Agora o bot é todo seu.\n\n"
              "Lembre-se que você pode usar os botões do menu a qualquer momento para acessar as funções.")
-    await query.edit_message_text(text=texto)
+    
+    # Responde à mensagem original ou edita a mensagem do botão
+    target_message = query.message if query else update.effective_message
+    await target_message.reply_text(text=texto)
+    
+    # Chama o start para mostrar o menu principal
     await start(update, context)
     return ConversationHandler.END
 
@@ -237,7 +247,34 @@ async def ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(texto_ajuda, parse_mode='Markdown')
 
 # (O resto do código segue abaixo)
+async def finalizar_onboarding_com_transacao(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Processa a transação final do onboarding e encerra o tutorial."""
+    texto = update.effective_message.text
+    padrao = re.compile(r'^([+\-])\s*(\d+(?:[.,]\d{1,2})?)\s*(.*)$')
+    match = padrao.match(texto)
 
+    if not match:
+        await update.effective_message.reply_text("Formato inválido. Tente algo como `-15 almoço` ou clique para finalizar o tour.")
+        return ONBOARDING_TRANSACAO # Permanece no mesmo estado se errar
+
+    # Registra a transação de forma simplificada, sem pedir forma de pagamento
+    user_id = get_user_id(update.effective_user.id)
+    sinal, valor_str, nome_categoria = match.groups()
+    nome_categoria = nome_categoria.strip().lower()
+    
+    if not nome_categoria:
+        await update.effective_message.reply_text("Você esqueceu da categoria! Tente `-15 almoço`.")
+        return ONBOARDING_TRANSACAO
+
+    # Chama a sua função principal de registro, mas sem o 'update' para não responder duas vezes
+    # e sem pedir cartão (id_cartao=None)
+    await registrar_transacao_final(update=None, context=context, user_id=user_id, nome_categoria=nome_categoria, sinal=sinal, valor_str=valor_str, id_cartao=None)
+    
+    # Mensagem de sucesso e finalização do tour
+    await update.effective_message.reply_text("Perfeito, sua primeira transação foi registrada!")
+    
+    # Chama a função que realmente finaliza e mostra o menu principal
+    return await onboarding_finalizar(update, context)
 # (Continuando o código...)
 async def add_cartao(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = get_user_id(update.effective_user.id)
@@ -270,7 +307,7 @@ async def add_cartao(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(f"💳 Cartão '{nome_cartao}' adicionado!")
         if context.user_data.get('onboarding'):
             conn.close()
-            return await onboarding_pedir_orcamento(update, context)
+            return await onboarding_pedir_transacao(update, context)
     except sqlite3.IntegrityError:
         await update.effective_message.reply_text(f"⚠️ Já existe um cartão com o nome '{nome_cartao}'.")
     finally:
@@ -901,24 +938,26 @@ def main():
     agendar_insights_semanais(application)
 
     onboarding_conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            ONBOARDING_INICIO: [
-                CallbackQueryHandler(onboarding_iniciar, pattern='^onboarding_start$'),
-                CallbackQueryHandler(onboarding_finalizar, pattern='^onboarding_skip_all$')
-            ],
-            ONBOARDING_ORCAMENTO: [
-                CommandHandler('add_cartao', add_cartao),
-                CallbackQueryHandler(onboarding_pular_cartao, pattern='^onboarding_skip_card$')
-            ],
-            ONBOARDING_TRANSACAO: [
-                CommandHandler('orcamento', set_orcamento),
-                CallbackQueryHandler(onboarding_pular_orcamento, pattern='^onboarding_skip_budget$'),
-                CallbackQueryHandler(onboarding_finalizar, pattern='^onboarding_skip_all$')
-            ],
-        },
-        fallbacks=[CommandHandler('start', start)],
-    )
+    entry_points=[CommandHandler("start", start)],
+    states={
+        ONBOARDING_INICIO: [
+            CallbackQueryHandler(onboarding_iniciar, pattern='^onboarding_start$'),
+            CallbackQueryHandler(onboarding_finalizar, pattern='^onboarding_skip_all$')
+        ],
+        ONBOARDING_ORCAMENTO: [
+            CommandHandler('add_cartao', add_cartao),
+            CallbackQueryHandler(onboarding_pular_cartao, pattern='^onboarding_skip_card$')
+        ],
+        # ESTE ESTADO FOI ATUALIZADO
+        ONBOARDING_TRANSACAO: [
+            # Espera por uma mensagem de texto que pareça uma transação
+            MessageHandler(filters.Regex(r'^[+\-]\s*(\d+(?:[.,]\d{1,2})?)\s*(.*)'), finalizar_onboarding_com_transacao),
+            # Ainda permite finalizar o tour com o botão
+            CallbackQueryHandler(onboarding_finalizar, pattern='^onboarding_skip_all$')
+        ],
+    },
+    fallbacks=[CommandHandler('start', start)],
+)
     
     transacao_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(r'^[+\-]\s*(\d+(?:[.,]\d{1,2})?)\s*(.*)'), iniciar_processo_transacao)],
