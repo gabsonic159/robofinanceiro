@@ -11,6 +11,7 @@ from datetime import datetime, time, timezone, timedelta
 from dateutil.relativedelta import relativedelta
 import pytz
 from thefuzz import process, fuzz
+from functools import wraps
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -55,8 +56,8 @@ def inicializar_db():
     cursor.execute('CREATE TABLE IF NOT EXISTS assinaturas (id_usuario INTEGER PRIMARY KEY, plano TEXT, data_expiracao TEXT, FOREIGN KEY (id_usuario) REFERENCES usuarios(id))')
     conn.commit()
     conn.close()
-from functools import wraps
 
+# --- Decorador de Acesso Premium ---
 def acesso_premium_necessario(func):
     """Um decorador que verifica se o usuário tem uma assinatura ativa."""
     @wraps(func)
@@ -65,7 +66,7 @@ def acesso_premium_necessario(func):
         user_id_interno = get_user_id(user_id_telegram)
 
         if not user_id_interno:
-            await update.message.reply_text("Por favor, inicie o bot com /start primeiro.")
+            await update.effective_message.reply_text("Por favor, inicie o bot com /start primeiro.")
             return
 
         conn = sqlite3.connect(DB_PATH)
@@ -75,15 +76,13 @@ def acesso_premium_necessario(func):
         conn.close()
 
         if assinatura and datetime.strptime(assinatura[0], '%Y-%m-%d') >= datetime.now():
-            # Se tem assinatura e não está expirada, executa o comando
             return await func(update, context, *args, **kwargs)
         else:
-            # Se não tem assinatura ou está expirada, envia a mensagem de venda
             texto_venda = "💎 Esta é uma funcionalidade exclusiva para assinantes Premium! Faça o upgrade para ter acesso a orçamentos, insights e muito mais."
-            # (Aqui você adicionaria o botão com o link de pagamento)
-            await update.message.reply_text(texto_venda)
+            await update.effective_message.reply_text(texto_venda)
             return
     return wrapper
+
 # --- Funções Auxiliares ---
 def get_user_id(telegram_id):
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
@@ -110,7 +109,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = cursor.fetchone()
 
     if not user_data:
-        # --- LÓGICA PARA NOVOS USUÁRIOS (INICIA ONBOARDING) ---
         data_criacao_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         cursor.execute("INSERT INTO usuarios (telegram_id, chat_id, nome_usuario, data_criacao, dias_sequencia) VALUES (?, ?, ?, ?, ?)", 
                        (telegram_id, chat_id, user.username, data_criacao_str, 0))
@@ -127,7 +125,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(welcome_text, reply_markup=InlineKeyboardMarkup(keyboard))
         return ONBOARDING_INICIO
     else:
-        # --- LÓGICA PARA USUÁRIOS EXISTENTES ---
         user_id_local, dias_sequencia = user_data
         cursor.execute("UPDATE usuarios SET chat_id = ? WHERE telegram_id = ?", (chat_id, telegram_id))
         conn.commit()
@@ -218,10 +215,10 @@ async def onboarding_finalizar(update: Update, context: ContextTypes.DEFAULT_TYP
 async def ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto_ajuda = (
         "🤖 *Comandos e Funções*\n\n"
-        "Para registrar uma transação, basta enviar uma mensagem no formato:\n"
-        "`-valor categoria` (para gastos)\n"
-        "`+valor categoria` (para receitas)\n\n"
-        "💰 *Orçamentos:*\n"
+        "Para registrar uma transação:\n"
+        "`-valor categoria` (gastos)\n"
+        "`+valor categoria` (receitas)\n\n"
+        "💰 *Orçamentos (Premium):*\n"
         "  `/orcamento <categoria> <valor>`\n"
         "  `/meus_orcamentos`\n"
         "  `/del_orcamento <categoria>`\n\n"
@@ -230,55 +227,51 @@ async def ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  `/list_cartoes`\n"
         "  `/fatura <nome_cartao>`\n"
         "  `/del_cartao <nome>`\n\n"
-        "⏰ *Lembretes e Agendamentos:*\n"
-        "  `/lembrete <HH:MM>` (Lembrete diário)\n"
-        "  `/agendar <dia> <HH:MM> [valor] <título>`\n\n"
-        "📊 *Análise e Exportação:*\n"
-        "  `/relatorio`\n"
+        "⏰ *Lembretes e Agendamentos (Premium):*\n"
+        "  `/agendar <dia> <HH:MM> [valor] <título>`\n"
+        "  `/ver_agendamentos`\n"
+        "  `/cancelar_agendamento <título>`\n\n"
+        "📊 *Análise e Exportação (Premium):*\n"
         "  `/exportar`"
     )
     await update.effective_message.reply_text(texto_ajuda, parse_mode='Markdown')
 
+# (O resto do código segue abaixo)
+
+# (Continuando o código...)
 async def add_cartao(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id_telegram = update.effective_user.id
-    user_id_interno = get_user_id(user_id_telegram)
-    
+    user_id = get_user_id(update.effective_user.id)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-
-    # ### MUDANÇA ###: Verifica o plano do usuário ANTES de adicionar o cartão
-    cursor.execute("SELECT data_expiracao FROM assinaturas WHERE id_usuario = ?", (user_id_interno,))
+    cursor.execute("SELECT data_expiracao FROM assinaturas WHERE id_usuario = ?", (user_id,))
     assinatura = cursor.fetchone()
     is_premium = bool(assinatura and datetime.strptime(assinatura[0], '%Y-%m-%d') >= datetime.now())
 
     if not is_premium:
-        cursor.execute("SELECT COUNT(id) FROM cartoes WHERE id_usuario = ?", (user_id_interno,))
+        cursor.execute("SELECT COUNT(id) FROM cartoes WHERE id_usuario = ?", (user_id,))
         num_cartoes = cursor.fetchone()[0]
         if num_cartoes >= 1:
-            await update.message.reply_text("💎 Você atingiu o limite de 1 cartão de crédito para o plano gratuito. Para adicionar cartões ilimitados, considere fazer o upgrade para o Premium!")
+            await update.effective_message.reply_text("💎 Você atingiu o limite de 1 cartão de crédito para o plano gratuito. Para adicionar cartões ilimitados, considere fazer o upgrade para o Premium!")
             conn.close()
             return
-    # ### FIM DA MUDANÇA ###
 
     try:
-        nome_cartao = context.args[0].capitalize()
-        limite = float(context.args[1].replace(',', '.'))
-        dia_fechamento = int(context.args[2])
+        nome_cartao = context.args[0].capitalize(); limite = float(context.args[1].replace(',', '.')); dia_fechamento = int(context.args[2])
         if not (1 <= dia_fechamento <= 31 and limite > 0): raise ValueError()
     except (IndexError, ValueError):
-        await update.message.reply_text("Formato inválido! Use: `/add_cartao <nome> <limite> <dia_fecha>`")
+        await update.effective_message.reply_text("Formato inválido! Use: `/add_cartao <nome> <limite> <dia_fecha>`")
         conn.close()
         return
     
     try:
-        cursor.execute("INSERT INTO cartoes (id_usuario, nome, limite, dia_fechamento) VALUES (?, ?, ?, ?)", (user_id_interno, nome_cartao, limite, dia_fechamento))
+        cursor.execute("INSERT INTO cartoes (id_usuario, nome, limite, dia_fechamento) VALUES (?, ?, ?, ?)", (user_id, nome_cartao, limite, dia_fechamento))
         conn.commit()
-        await update.message.reply_text(f"💳 Cartão '{nome_cartao}' adicionado!")
+        await update.effective_message.reply_text(f"💳 Cartão '{nome_cartao}' adicionado!")
         if context.user_data.get('onboarding'):
             conn.close()
             return await onboarding_pedir_orcamento(update, context)
     except sqlite3.IntegrityError:
-        await update.message.reply_text(f"⚠️ Já existe um cartão com o nome '{nome_cartao}'.")
+        await update.effective_message.reply_text(f"⚠️ Já existe um cartão com o nome '{nome_cartao}'.")
     finally:
         conn.close()
 
@@ -290,31 +283,18 @@ async def set_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
         valor = float(args[-1].replace(',', '.'))
         nome_categoria = " ".join(args[:-1]).lower()
         if not nome_categoria or valor <= 0: raise ValueError()
-
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        # Procura a categoria. Se não existir, cria (usuários premium não têm limite).
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
         cursor.execute("SELECT id FROM categorias WHERE id_usuario = ? AND nome = ?", (user_id, nome_categoria))
         categoria = cursor.fetchone()
         if not categoria:
-            cursor.execute("INSERT INTO categorias (id_usuario, nome) VALUES (?, ?)", (user_id, nome_categoria))
-            conn.commit()
+            cursor.execute("INSERT INTO categorias (id_usuario, nome) VALUES (?, ?)", (user_id, nome_categoria)); conn.commit()
             categoria_id = cursor.lastrowid
         else:
             categoria_id = categoria[0]
-            
-        # Insere ou atualiza o orçamento
-        cursor.execute("REPLACE INTO orcamentos (id_usuario, id_categoria, valor) VALUES (?, ?, ?)", (user_id, categoria_id, valor))
-        conn.commit()
-        conn.close()
-        
+        cursor.execute("REPLACE INTO orcamentos (id_usuario, id_categoria, valor) VALUES (?, ?, ?)", (user_id, categoria_id, valor)); conn.commit(); conn.close()
         await update.effective_message.reply_text(f"✅ Orçamento de R$ {valor:.2f} definido para a categoria '{nome_categoria.capitalize()}'.")
-
-        # Gancho para o onboarding (agora dentro do try/except)
         if context.user_data.get('onboarding'):
             return await onboarding_pedir_transacao(update, context)
-
     except (IndexError, ValueError):
         await update.effective_message.reply_text("Formato inválido! Use: `/orcamento <categoria> <valor>`\nExemplo: `/orcamento lazer 300`")
 
@@ -323,9 +303,7 @@ async def list_orcamentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = get_user_id(update.effective_user.id)
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     agora_utc = datetime.now(timezone.utc); inicio_mes_str = agora_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
-    query = """
-    SELECT c.nome, o.valor, (SELECT SUM(t.valor) FROM transacoes t WHERE t.id_categoria = c.id AND t.id_usuario = ? AND t.tipo = 'saida' AND t.data_transacao >= ?) as gasto_total
-    FROM orcamentos o JOIN categorias c ON o.id_categoria = c.id WHERE o.id_usuario = ? ORDER BY c.nome"""
+    query = "SELECT c.nome, o.valor, (SELECT SUM(t.valor) FROM transacoes t WHERE t.id_categoria = c.id AND t.id_usuario = ? AND t.tipo = 'saida' AND t.data_transacao >= ?) as gasto_total FROM orcamentos o JOIN categorias c ON o.id_categoria = c.id WHERE o.id_usuario = ? ORDER BY c.nome"
     cursor.execute(query, (user_id, inicio_mes_str, user_id)); orcamentos = cursor.fetchall(); conn.close()
     if not orcamentos:
         await update.effective_message.reply_text("Você ainda não definiu nenhum orçamento. Use `/orcamento <categoria> <valor>` para começar.")
@@ -359,9 +337,7 @@ async def del_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except (IndexError, ValueError):
         await update.effective_message.reply_text("Formato inválido! Use: `/del_orcamento <categoria>`")
 
-# ... (todas as outras funções que você já tem, como menu_cartoes, list_cartoes, etc., vêm aqui)
-# (COLEI TODAS ABAIXO PARA GARANTIR QUE NÃO FALTE NADA)
-
+# ... (todas as outras funções do seu bot, como menu_lembretes_e_agendamentos, etc., vêm aqui) ...
 async def menu_lembretes_e_agendamentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = ("Aqui pode configurar suas notificações:\n\n"
              "☀️ *LEMBRETE DIÁRIO* (para registrar gastos)\n`/lembrete HH:MM`\n`/cancelar_lembrete`\n\n"
@@ -919,13 +895,12 @@ def main():
         },
         fallbacks=[CommandHandler('cancelar', cancelar_conversa)],
     )
-    
-    # Ordem de adição é importante. O Onboarding controla o /start para novos usuários.
+
     application.add_handler(onboarding_conv)
     application.add_handler(transacao_conv)
     application.add_handler(relatorio_conv)
 
-    # Commandos que não fazem parte de conversas
+# Commandos que não fazem parte de conversas
     application.add_handler(CommandHandler("ajuda", ajuda))
     application.add_handler(CommandHandler("listarcategorias", list_categorias))
     application.add_handler(CommandHandler("del_categoria", del_categoria))
@@ -941,7 +916,6 @@ def main():
     application.add_handler(CommandHandler("meus_orcamentos", list_orcamentos))
     application.add_handler(CommandHandler("del_orcamento", del_orcamento))
     application.add_handler(CommandHandler("apagarusuario", apagar_usuario))
-
     # Botões do menu que não são entry points
     application.add_handler(MessageHandler(filters.Regex('^🗂️ Categorias$'), list_categorias))
     application.add_handler(MessageHandler(filters.Regex('^💳 Cartões$'), menu_cartoes))
@@ -949,14 +923,8 @@ def main():
     application.add_handler(MessageHandler(filters.Regex('^⏰ Lembretes/Agendamentos$'), menu_lembretes_e_agendamentos))
     application.add_handler(MessageHandler(filters.Regex('^⬇️ Exportar$'), exportar_csv))
     application.add_handler(MessageHandler(filters.Regex('^🏠 Menu Principal$'), start))
-    
-    application.add_handler(CallbackQueryHandler(desfazer_lancamento, pattern="^undo:"))
-    
-    async def fallback_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.effective_message.reply_text("Não entendi. Para registar uma transação, use o formato `-valor categoria` ou `+valor categoria`.")
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_text))
 
-    logger.info("Bot v22 (Onboarding Completo) iniciado!")
+    logger.info("Bot v23 (Paywall Completo) iniciado!")
     application.run_polling()
 
 if __name__ == '__main__':
