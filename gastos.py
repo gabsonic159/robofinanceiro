@@ -318,6 +318,7 @@ async def set_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except (IndexError, ValueError):
         await update.effective_message.reply_text("Formato inválido! Use: `/orcamento <categoria> <valor>`\nExemplo: `/orcamento lazer 300`")
 
+@acesso_premium_necessario
 async def list_orcamentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = get_user_id(update.effective_user.id)
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
@@ -336,6 +337,7 @@ async def list_orcamentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         resposta.append(f"🔹 *{nome_cat.capitalize()}*: R$ {gasto_total:.2f} de R$ {valor_orc:.2f} ({percentual:.1f}%)")
     await update.effective_message.reply_text("\n".join(resposta), parse_mode='Markdown')
 
+@acesso_premium_necessario
 async def del_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = get_user_id(update.effective_user.id)
     try:
@@ -518,6 +520,7 @@ async def cancelar_conversa(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if key in context.user_data: del context.user_data[key]
     await update.effective_message.reply_text("Operação cancelada."); return ConversationHandler.END
 
+@acesso_premium_necessario
 async def exportar_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = get_user_id(update.effective_user.id); agora_utc = datetime.now(timezone.utc); inicio_mes_utc_str = agora_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d %H:%M:%S'); conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT t.data_transacao, t.tipo, t.valor, c.nome as cat_nome, cart.nome as cart_nome FROM transacoes t LEFT JOIN categorias c ON t.id_categoria = c.id LEFT JOIN cartoes cart ON t.id_cartao = cart.id WHERE t.id_usuario = ? AND t.data_transacao >= ? ORDER BY t.data_transacao ASC", (user_id, inicio_mes_utc_str)); transacoes = cursor.fetchall(); conn.close()
@@ -717,6 +720,8 @@ async def cancelar_lembrete_diario(update: Update, context: ContextTypes.DEFAULT
     for job in jobs: job.schedule_removal()
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor(); cursor.execute("DELETE FROM lembretes_diarios WHERE id_usuario = ?", (user_id,)); conn.commit(); conn.close()
     await update.effective_message.reply_text("✅ Lembrete diário cancelado.")
+
+@acesso_premium_necessario
 async def agendar_conta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = get_user_id(update.effective_user.id); chat_id = update.effective_chat.id; args = context.args
     try:
@@ -735,6 +740,8 @@ async def agendar_conta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.application.job_queue.run_monthly(callback_func, when=horario_obj, day=dia, name=job_name, chat_id=chat_id, data={'user_id': user_id, 'nome_categoria': titulo.lower(), 'sinal': '-', 'valor_str': str(valor), 'titulo': titulo})
     if valor: await update.effective_message.reply_text(f"✅ Despesa '{titulo.capitalize()}' de R$ {valor:.2f} agendada para todo dia {dia} às {horario_str}!")
     else: await update.effective_message.reply_text(f"✅ Lembrete para '{titulo.capitalize()}' agendado para todo dia {dia} às {horario_str}!")
+
+@acesso_premium_necessario
 async def ver_agendamentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = get_user_id(update.effective_user.id); conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT dia, horario, titulo, valor FROM agendamentos WHERE id_usuario = ? ORDER BY dia, horario", (user_id,)); agendamentos = cursor.fetchall(); conn.close()
@@ -744,6 +751,8 @@ async def ver_agendamentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if valor: resposta.append(f"- *Dia {dia}, {horario}:* {titulo.capitalize()} (R$ {valor:.2f} - Fixo)")
         else: resposta.append(f"- *Dia {dia}, {horario}:* {titulo.capitalize()} (Variável)")
     await update.effective_message.reply_text("\n".join(resposta), parse_mode='Markdown')
+
+@acesso_premium_necessario
 async def cancelar_agendamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = get_user_id(update.effective_user.id); chat_id = update.effective_chat.id
     try: titulo_para_remover = " ".join(context.args).lower().strip()
@@ -797,23 +806,51 @@ async def apagar_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("Uso: /apagarusuario <ID do Telegram do usuário>")
 
 async def enviar_insight_semanal(context: ContextTypes.DEFAULT_TYPE):
+    """Calcula e envia o insight da semana para um usuário específico."""
     job_data = context.job.data
-    user_id = job_data["user_id"]; chat_id = job_data["chat_id"]
-    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    user_id = job_data["user_id"]
+    chat_id = job_data["chat_id"]
+    
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # ### VERIFICAÇÃO PREMIUM ###
+    # Verifica se o usuário ainda tem uma assinatura ativa antes de enviar o insight
+    cursor.execute("SELECT data_expiracao FROM assinaturas WHERE id_usuario = ?", (user_id,))
+    assinatura = cursor.fetchone()
+    if not (assinatura and datetime.strptime(assinatura[0], '%Y-%m-%d') >= datetime.now()):
+        conn.close()
+        logger.info(f"Usuário {user_id} não é mais premium. Insight semanal não enviado.")
+        return # Para a execução se o usuário não for premium
+    # ### FIM DA VERIFICAÇÃO ###
+    
+    # Calcula a data de 7 dias atrás
     sete_dias_atras = (datetime.now(timezone.utc) - timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S')
+    
+    # Query para encontrar a categoria com maior gasto na última semana
     cursor.execute("""
-        SELECT c.nome, SUM(t.valor) as total_gasto FROM transacoes t JOIN categorias c ON t.id_categoria = c.id
+        SELECT c.nome, SUM(t.valor) as total_gasto
+        FROM transacoes t
+        JOIN categorias c ON t.id_categoria = c.id
         WHERE t.id_usuario = ? AND t.tipo = 'saida' AND t.data_transacao >= ?
-        GROUP BY c.nome ORDER BY total_gasto DESC LIMIT 1
-    """, (user_id, sete_dias_atras)); maior_gasto = cursor.fetchone(); conn.close()
+        GROUP BY c.nome
+        ORDER BY total_gasto DESC
+        LIMIT 1
+    """, (user_id, sete_dias_atras))
+    
+    maior_gasto = cursor.fetchone()
+    conn.close()
+    
     if maior_gasto:
         nome_categoria, total_gasto = maior_gasto
-        mensagem = (f"💡 *Seu Insight da Semana!*\n\n"
-                    f"Nos últimos 7 dias, sua maior categoria de gastos foi *{nome_categoria.capitalize()}*, "
-                    f"totalizando *R$ {total_gasto:.2f}*.\n\n"
-                    f"Continue registrando para mais insights! 😉")
+        mensagem = (
+            f"💡 *Seu Insight da Semana Premium!*\n\n"
+            f"Nos últimos 7 dias, sua maior categoria de gastos foi *{nome_categoria.capitalize()}*, "
+            f"totalizando *R$ {total_gasto:.2f}*.\n\n"
+            f"Continue registrando para mais insights! 😉"
+        )
         await context.bot.send_message(chat_id=chat_id, text=mensagem, parse_mode='Markdown')
-
+        
 def agendar_insights_semanais(application: Application):
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT id, chat_id FROM usuarios WHERE chat_id IS NOT NULL"); usuarios = cursor.fetchall(); conn.close()
