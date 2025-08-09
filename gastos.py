@@ -906,6 +906,7 @@ def main():
 
 # Commandos que não fazem parte de conversas
     application.add_handler(CommandHandler("ajuda", ajuda))
+    application.add_handler(CommandHandler("add_cartao", add_cartao))
     application.add_handler(CommandHandler("listarcategorias", list_categorias))
     application.add_handler(CommandHandler("del_categoria", del_categoria))
     application.add_handler(CommandHandler("exportar", exportar_csv))
@@ -923,6 +924,7 @@ def main():
     # Botões do menu que não são entry points
     application.add_handler(MessageHandler(filters.Regex('^🗂️ Categorias$'), list_categorias))
     application.add_handler(MessageHandler(filters.Regex('^💳 Cartões$'), menu_cartoes))
+    
     application.add_handler(MessageHandler(filters.Regex('^💡 Ajuda$'), ajuda))
     application.add_handler(MessageHandler(filters.Regex('^⏰ Lembretes/Agendamentos$'), menu_lembretes_e_agendamentos))
     application.add_handler(MessageHandler(filters.Regex('^⬇️ Exportar$'), exportar_csv))
