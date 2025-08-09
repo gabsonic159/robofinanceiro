@@ -251,7 +251,8 @@ async def add_cartao(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("SELECT COUNT(id) FROM cartoes WHERE id_usuario = ?", (user_id,))
         num_cartoes = cursor.fetchone()[0]
         if num_cartoes >= 1:
-            await update.effective_message.reply_text("💎 Você atingiu o limite de 1 cartão de crédito para o plano gratuito. Para adicionar cartões ilimitados, considere fazer o upgrade para o Premium!")
+            # <<< A MUDANÇA ESTÁ AQUI >>>
+            await handle_premium_upsell(update, context, feature_name="1 cartão de crédito")
             conn.close()
             return
 
@@ -585,11 +586,9 @@ async def registrar_transacao_final(update: Update, context: ContextTypes.DEFAUL
         if not is_premium:
             cursor.execute("SELECT COUNT(id) FROM categorias WHERE id_usuario = ?", (user_id,))
             num_categorias = cursor.fetchone()[0]
-            if num_categorias >= 5:
-                mensagem_erro = "💎 Você atingiu o limite de 5 categorias para o plano gratuito. Para criar categorias ilimitadas, considere fazer o upgrade para o Premium com o comando /assinar!"
-                target_message = update.callback_query.message if (update and update.callback_query) else (update.message if update else None)
-                if target_message:
-                    await target_message.reply_text(mensagem_erro)
+            if num_categorias >= 3:
+                # <<< A MUDANÇA ESTÁ AQUI >>>
+                await handle_premium_upsell(update, context, feature_name="3 categorias")
                 conn.close()
                 return
         
@@ -847,6 +846,49 @@ async def callback_agendamento(context: ContextTypes.DEFAULT_TYPE):
     user_id = job_data.get('user_id'); nome_categoria = job_data.get('nome_categoria'); sinal = job_data.get('sinal'); valor_str = job_data.get('valor_str')
     await registrar_transacao_final(update=None, context=context, user_id=user_id, nome_categoria=nome_categoria, sinal=sinal, valor_str=valor_str, is_scheduled=True)
 
+async def handle_premium_upsell(update: Update, context: ContextTypes.DEFAULT_TYPE, feature_name: str):
+    """
+    Envia uma mensagem padronizada e interativa quando um usuário gratuito atinge um limite.
+    """
+    texto = (
+        f"💎 **Você atingiu o limite de {feature_name} do plano gratuito!**\n\n"
+        "Vejo que você está organizando bem suas finanças! Para levar seu controle a um novo patamar, o plano **Premium** oferece:\n\n"
+        "✅ **Categorias e Cartões ilimitados**\n"
+        "📊 **Relatórios com gráficos detalhados**\n"
+        "💰 **Criação de orçamentos por categoria**\n"
+        "⏰ **Agendamento de contas e lembretes**\n\n"
+        "Libere todo o potencial do bot e tenha uma visão completa da sua vida financeira!"
+    )
+    
+    # Você precisará criar um handler para 'upgrade_premium' que envie os detalhes da assinatura
+    keyboard = [
+        [InlineKeyboardButton("✨ Fazer Upgrade Agora", callback_data="upgrade_premium")],
+        [InlineKeyboardButton("✖️ Agora não", callback_data="dismiss_upsell")]
+    ]
+
+    # Se o limite for de categorias, ofereça a opção de gerenciá-las
+    if "categoria" in feature_name:
+        keyboard.insert(1, [InlineKeyboardButton("🗂️ Gerenciar minhas categorias", callback_data="manage_categories")])
+        
+    await update.effective_message.reply_text(
+        text=texto,
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# Crie também os handlers para os botões que você adicionou
+async def dismiss_upsell(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Entendido. Continue aproveitando os recursos gratuitos! 😉")
+
+# O handler de 'manage_categories' pode simplesmente chamar sua função list_categorias
+async def manage_categories_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text("Aqui estão suas categorias atuais. Você pode usar /del_categoria para remover alguma.")
+    await list_categorias(update, context) # Reutiliza sua função existente
+
 def main():
     inicializar_db()
     TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -904,6 +946,12 @@ def main():
     application.add_handler(transacao_conv)
     application.add_handler(relatorio_conv)
 
+
+# ... no seu main()
+    application.add_handler(CallbackQueryHandler(dismiss_upsell, pattern="^dismiss_upsell$"))
+    application.add_handler(CallbackQueryHandler(manage_categories_callback, pattern="^manage_categories$"))
+# Adicione também o handler para 'upgrade_premium'
+    #application.add_handler(CallbackQueryHandler(funcao_de_assinar, pattern="^upgrade_premium$"))
 # Commandos que não fazem parte de conversas
     application.add_handler(CommandHandler("ajuda", ajuda))
     application.add_handler(CommandHandler("add_cartao", add_cartao))
