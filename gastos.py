@@ -52,9 +52,38 @@ def inicializar_db():
     cursor.execute('CREATE TABLE IF NOT EXISTS lembretes_diarios (id_usuario INTEGER PRIMARY KEY, horario TEXT, chat_id INTEGER, FOREIGN KEY (id_usuario) REFERENCES usuarios(id))')
     cursor.execute('CREATE TABLE IF NOT EXISTS agendamentos (id INTEGER PRIMARY KEY AUTOINCREMENT, id_usuario INTEGER, dia INTEGER, horario TEXT, titulo TEXT, valor REAL, chat_id INTEGER, UNIQUE(id_usuario, titulo), FOREIGN KEY (id_usuario) REFERENCES usuarios(id))')
     cursor.execute('CREATE TABLE IF NOT EXISTS orcamentos (id INTEGER PRIMARY KEY AUTOINCREMENT, id_usuario INTEGER, id_categoria INTEGER, valor REAL, UNIQUE(id_usuario, id_categoria), FOREIGN KEY (id_usuario) REFERENCES usuarios(id), FOREIGN KEY (id_categoria) REFERENCES categorias(id))')
+    cursor.execute('CREATE TABLE IF NOT EXISTS assinaturas (id_usuario INTEGER PRIMARY KEY, plano TEXT, data_expiracao TEXT, FOREIGN KEY (id_usuario) REFERENCES usuarios(id))')
     conn.commit()
     conn.close()
+from functools import wraps
 
+def acesso_premium_necessario(func):
+    """Um decorador que verifica se o usuário tem uma assinatura ativa."""
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user_id_telegram = update.effective_user.id
+        user_id_interno = get_user_id(user_id_telegram)
+
+        if not user_id_interno:
+            await update.message.reply_text("Por favor, inicie o bot com /start primeiro.")
+            return
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT data_expiracao FROM assinaturas WHERE id_usuario = ?", (user_id_interno,))
+        assinatura = cursor.fetchone()
+        conn.close()
+
+        if assinatura and datetime.strptime(assinatura[0], '%Y-%m-%d') >= datetime.now():
+            # Se tem assinatura e não está expirada, executa o comando
+            return await func(update, context, *args, **kwargs)
+        else:
+            # Se não tem assinatura ou está expirada, envia a mensagem de venda
+            texto_venda = "💎 Esta é uma funcionalidade exclusiva para assinantes Premium! Faça o upgrade para ter acesso a orçamentos, insights e muito mais."
+            # (Aqui você adicionaria o botão com o link de pagamento)
+            await update.message.reply_text(texto_venda)
+            return
+    return wrapper
 # --- Funções Auxiliares ---
 def get_user_id(telegram_id):
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
@@ -211,21 +240,49 @@ async def ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(texto_ajuda, parse_mode='Markdown')
 
 async def add_cartao(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = get_user_id(update.effective_user.id)
-    try:
-        nome_cartao = context.args[0].capitalize(); limite = float(context.args[1].replace(',', '.')); dia_fechamento = int(context.args[2])
-        if not (1 <= dia_fechamento <= 31 and limite > 0): raise ValueError()
-    except (IndexError, ValueError): await update.effective_message.reply_text("Formato inválido! Use: `/add_cartao <nome> <limite> <dia_fecha>`"); return
-    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-    try:
-        cursor.execute("INSERT INTO cartoes (id_usuario, nome, limite, dia_fechamento) VALUES (?, ?, ?, ?)", (user_id, nome_cartao, limite, dia_fechamento)); conn.commit()
-        await update.effective_message.reply_text(f"💳 Cartão '{nome_cartao}' adicionado!")
-    except sqlite3.IntegrityError: await update.effective_message.reply_text(f"⚠️ Já existe um cartão com o nome '{nome_cartao}'.")
-    finally: conn.close()
+    user_id_telegram = update.effective_user.id
+    user_id_interno = get_user_id(user_id_telegram)
     
-    if context.user_data.get('onboarding'):
-        return await onboarding_pedir_orcamento(update, context)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
 
+    # ### MUDANÇA ###: Verifica o plano do usuário ANTES de adicionar o cartão
+    cursor.execute("SELECT data_expiracao FROM assinaturas WHERE id_usuario = ?", (user_id_interno,))
+    assinatura = cursor.fetchone()
+    is_premium = bool(assinatura and datetime.strptime(assinatura[0], '%Y-%m-%d') >= datetime.now())
+
+    if not is_premium:
+        cursor.execute("SELECT COUNT(id) FROM cartoes WHERE id_usuario = ?", (user_id_interno,))
+        num_cartoes = cursor.fetchone()[0]
+        if num_cartoes >= 1:
+            await update.message.reply_text("💎 Você atingiu o limite de 1 cartão de crédito para o plano gratuito. Para adicionar cartões ilimitados, considere fazer o upgrade para o Premium!")
+            conn.close()
+            return
+    # ### FIM DA MUDANÇA ###
+
+    try:
+        nome_cartao = context.args[0].capitalize()
+        limite = float(context.args[1].replace(',', '.'))
+        dia_fechamento = int(context.args[2])
+        if not (1 <= dia_fechamento <= 31 and limite > 0): raise ValueError()
+    except (IndexError, ValueError):
+        await update.message.reply_text("Formato inválido! Use: `/add_cartao <nome> <limite> <dia_fecha>`")
+        conn.close()
+        return
+    
+    try:
+        cursor.execute("INSERT INTO cartoes (id_usuario, nome, limite, dia_fechamento) VALUES (?, ?, ?, ?)", (user_id_interno, nome_cartao, limite, dia_fechamento))
+        conn.commit()
+        await update.message.reply_text(f"💳 Cartão '{nome_cartao}' adicionado!")
+        if context.user_data.get('onboarding'):
+            conn.close()
+            return await onboarding_pedir_orcamento(update, context)
+    except sqlite3.IntegrityError:
+        await update.message.reply_text(f"⚠️ Já existe um cartão com o nome '{nome_cartao}'.")
+    finally:
+        conn.close()
+
+@acesso_premium_necessario
 async def set_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = get_user_id(update.effective_user.id)
     try:
@@ -233,21 +290,33 @@ async def set_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
         valor = float(args[-1].replace(',', '.'))
         nome_categoria = " ".join(args[:-1]).lower()
         if not nome_categoria or valor <= 0: raise ValueError()
-        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Procura a categoria. Se não existir, cria (usuários premium não têm limite).
         cursor.execute("SELECT id FROM categorias WHERE id_usuario = ? AND nome = ?", (user_id, nome_categoria))
         categoria = cursor.fetchone()
         if not categoria:
-            cursor.execute("INSERT INTO categorias (id_usuario, nome) VALUES (?, ?)", (user_id, nome_categoria)); conn.commit()
+            cursor.execute("INSERT INTO categorias (id_usuario, nome) VALUES (?, ?)", (user_id, nome_categoria))
+            conn.commit()
             categoria_id = cursor.lastrowid
         else:
             categoria_id = categoria[0]
-        cursor.execute("REPLACE INTO orcamentos (id_usuario, id_categoria, valor) VALUES (?, ?, ?)", (user_id, categoria_id, valor)); conn.commit(); conn.close()
+            
+        # Insere ou atualiza o orçamento
+        cursor.execute("REPLACE INTO orcamentos (id_usuario, id_categoria, valor) VALUES (?, ?, ?)", (user_id, categoria_id, valor))
+        conn.commit()
+        conn.close()
+        
         await update.effective_message.reply_text(f"✅ Orçamento de R$ {valor:.2f} definido para a categoria '{nome_categoria.capitalize()}'.")
+
+        # Gancho para o onboarding (agora dentro do try/except)
+        if context.user_data.get('onboarding'):
+            return await onboarding_pedir_transacao(update, context)
+
     except (IndexError, ValueError):
         await update.effective_message.reply_text("Formato inválido! Use: `/orcamento <categoria> <valor>`\nExemplo: `/orcamento lazer 300`")
-
-    if context.user_data.get('onboarding'):
-        return await onboarding_pedir_transacao(update, context)
 
 async def list_orcamentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = get_user_id(update.effective_user.id)
@@ -398,23 +467,51 @@ async def receber_data_fim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await gerar_relatorio(update, context, inicio_local.astimezone(timezone.utc), fim_local.astimezone(timezone.utc))
     except (ValueError, KeyError): await update.effective_message.reply_text("Ocorreu um erro. Use `DD/MM/AAAA` ou /cancelar para recomeçar."); return AGUARDANDO_DATA_FIM
 async def gerar_relatorio(update: Update, context: ContextTypes.DEFAULT_TYPE, data_inicio, data_fim):
-    user_id = get_user_id(update.effective_user.id); inicio_str = data_inicio.strftime('%Y-%m-%d %H:%M:%S'); fim_str = data_fim.strftime('%Y-%m-%d %H:%M:%S')
-    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-    cursor.execute("SELECT SUM(valor) FROM transacoes WHERE id_usuario = ? AND tipo = 'entrada' AND data_transacao BETWEEN ? AND ?", (user_id, inicio_str, fim_str)); entradas = cursor.fetchone()[0] or 0.0
-    cursor.execute("SELECT SUM(valor) FROM transacoes WHERE id_usuario = ? AND tipo = 'saida' AND data_transacao BETWEEN ? AND ?", (user_id, inicio_str, fim_str)); saidas = cursor.fetchone()[0] or 0.0
+    user_id_telegram = update.effective_user.id
+    user_id_interno = get_user_id(user_id_telegram)
+    
+    inicio_str = data_inicio.strftime('%Y-%m-%d %H:%M:%S')
+    fim_str = data_fim.strftime('%Y-%m-%d %H:%M:%S')
+    
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # ### MUDANÇA ###: Verifica se o usuário é premium
+    cursor.execute("SELECT data_expiracao FROM assinaturas WHERE id_usuario = ?", (user_id_interno,))
+    assinatura = cursor.fetchone()
+    is_premium = bool(assinatura and datetime.strptime(assinatura[0], '%Y-%m-%d') >= datetime.now())
+    # ### FIM DA MUDANÇA ###
+    
+    cursor.execute("SELECT SUM(valor) FROM transacoes WHERE id_usuario = ? AND tipo = 'entrada' AND data_transacao BETWEEN ? AND ?", (user_id_interno, inicio_str, fim_str)); entradas = cursor.fetchone()[0] or 0.0
+    cursor.execute("SELECT SUM(valor) FROM transacoes WHERE id_usuario = ? AND tipo = 'saida' AND data_transacao BETWEEN ? AND ?", (user_id_interno, inicio_str, fim_str)); saidas = cursor.fetchone()[0] or 0.0
     saldo = entradas - saidas
-    cursor.execute("SELECT c.nome, SUM(t.valor) FROM transacoes t LEFT JOIN categorias c ON t.id_categoria = c.id WHERE t.id_usuario = ? AND t.tipo = 'saida' AND data_transacao BETWEEN ? AND ? GROUP BY c.nome ORDER BY SUM(t.valor) DESC", (user_id, inicio_str, fim_str)); gastos_por_categoria = cursor.fetchall(); conn.close()
+    cursor.execute("SELECT c.nome, SUM(t.valor) FROM transacoes t LEFT JOIN categorias c ON t.id_categoria = c.id WHERE t.id_usuario = ? AND t.tipo = 'saida' AND data_transacao BETWEEN ? AND ? GROUP BY c.nome ORDER BY SUM(t.valor) DESC", (user_id_interno, inicio_str, fim_str)); gastos_por_categoria = cursor.fetchall()
+    conn.close()
+    
     titulo_periodo = f"de {data_inicio.astimezone(pytz.timezone('America/Sao_Paulo')).strftime('%d/%m/%Y')} a {data_fim.astimezone(pytz.timezone('America/Sao_Paulo')).strftime('%d/%m/%Y')}"
     legenda_texto = [f"📊 *Relatório do Período*\n_{titulo_periodo}_", f"🟢 Entradas: R$ {entradas:.2f}", f"🔴 Saídas: R$ {saidas:.2f}", f"💰 Saldo do Período: R$ {saldo:.2f}"]
+    
     if gastos_por_categoria:
         legenda_texto.append("\n*Gastos por Categoria:*")
         for nome, total in gastos_por_categoria:
             percentual = (total / saidas) * 100 if saidas > 0 else 0
             legenda_texto.append(f"  - {nome.capitalize()}: R$ {total:.2f} ({percentual:.1f}%)")
-    buffer_imagem = gerar_grafico_pizza(gastos_por_categoria); mensagem_final = "\n".join(legenda_texto)
+            
+    # ### MUDANÇA ###: Só gera o gráfico se for premium
+    buffer_imagem = None
+    if is_premium:
+        buffer_imagem = gerar_grafico_pizza(gastos_por_categoria)
+    # ### FIM DA MUDANÇA ###
+    
+    mensagem_final = "\n".join(legenda_texto)
+    
     if update.callback_query: await update.callback_query.delete_message()
-    if buffer_imagem: await context.bot.send_photo(chat_id=update.effective_chat.id, photo=buffer_imagem, caption=mensagem_final, parse_mode='Markdown')
-    else: await context.bot.send_message(chat_id=update.effective_chat.id, text=mensagem_final, parse_mode='Markdown')
+    
+    if buffer_imagem:
+        await context.bot.send_photo(chat_id=update.effective_chat.id, photo=buffer_imagem, caption=mensagem_final, parse_mode='Markdown')
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=mensagem_final, parse_mode='Markdown')
+        
     return ConversationHandler.END
 async def cancelar_conversa(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for key in ['data_inicio_relatorio', 'transacao_pendente', 'sugestao_categoria']:
@@ -494,16 +591,47 @@ async def receber_forma_pagamento(update: Update, context: ContextTypes.DEFAULT_
     return ConversationHandler.END
 
 async def registrar_transacao_final(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id, nome_categoria, sinal, valor_str, id_cartao=None, is_scheduled=False):
-    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-    cursor.execute("SELECT id FROM categorias WHERE id_usuario = ? AND nome = ?", (user_id, nome_categoria)); categoria = cursor.fetchone()
-    if not categoria: cursor.execute("INSERT INTO categorias (id_usuario, nome) VALUES (?, ?)", (user_id, nome_categoria)); conn.commit(); categoria_id = cursor.lastrowid
-    else: categoria_id = categoria[0]
-    tipo = 'saida' if sinal == '-' else 'entrada'; valor = float(valor_str.replace(',', '.')); data_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-    cursor.execute("INSERT INTO transacoes (id_usuario, id_categoria, valor, tipo, data_transacao, id_cartao) VALUES (?, ?, ?, ?, ?, ?)", (user_id, categoria_id, valor, tipo, data_str, id_cartao)); new_transaction_id = cursor.lastrowid
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT id FROM categorias WHERE id_usuario = ? AND nome = ?", (user_id, nome_categoria))
+    categoria = cursor.fetchone()
+    
+    if not categoria:
+        # LÓGICA DE LIMITE DE CATEGORIAS PARA PLANO GRATUITO
+        cursor.execute("SELECT data_expiracao FROM assinaturas WHERE id_usuario = ?", (user_id,))
+        assinatura = cursor.fetchone()
+        is_premium = bool(assinatura and datetime.strptime(assinatura[0], '%Y-%m-%d') >= datetime.now())
+
+        if not is_premium:
+            cursor.execute("SELECT COUNT(id) FROM categorias WHERE id_usuario = ?", (user_id,))
+            num_categorias = cursor.fetchone()[0]
+            if num_categorias >= 5:
+                mensagem_erro = "💎 Você atingiu o limite de 5 categorias para o plano gratuito. Para criar categorias ilimitadas, considere fazer o upgrade para o Premium com o comando /assinar!"
+                target_message = update.callback_query.message if (update and update.callback_query) else (update.message if update else None)
+                if target_message:
+                    await target_message.reply_text(mensagem_erro)
+                conn.close()
+                return
+        
+        cursor.execute("INSERT INTO categorias (id_usuario, nome) VALUES (?, ?)", (user_id, nome_categoria)); conn.commit()
+        categoria_id = cursor.lastrowid
+    else: 
+        categoria_id = categoria[0]
+        
+    tipo = 'saida' if sinal == '-' else 'entrada'
+    valor = float(valor_str.replace(',', '.'))
+    data_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    
+    cursor.execute("INSERT INTO transacoes (id_usuario, id_categoria, valor, tipo, data_transacao, id_cartao) VALUES (?, ?, ?, ?, ?, ?)", (user_id, categoria_id, valor, tipo, data_str, id_cartao))
+    new_transaction_id = cursor.lastrowid
     
     mensagem_sequencia = ""
     if not is_scheduled:
-        hoje_str = datetime.now(timezone.utc).strftime('%Y-%m-%d'); cursor.execute("SELECT ultimo_lancamento, dias_sequencia FROM usuarios WHERE id = ?", (user_id,)); ultimo_lancamento, dias_sequencia = cursor.fetchone(); dias_sequencia = dias_sequencia or 0
+        hoje_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        cursor.execute("SELECT ultimo_lancamento, dias_sequencia FROM usuarios WHERE id = ?", (user_id,))
+        ultimo_lancamento, dias_sequencia = cursor.fetchone()
+        dias_sequencia = dias_sequencia or 0
         if ultimo_lancamento != hoje_str:
             ontem_str = (datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%d')
             nova_sequencia = dias_sequencia + 1 if ultimo_lancamento == ontem_str else 1
@@ -516,8 +644,7 @@ async def registrar_transacao_final(update: Update, context: ContextTypes.DEFAUL
         orcamento = cursor.fetchone()
         if orcamento:
             orcamento_valor = orcamento[0]
-            agora_utc = datetime.now(timezone.utc)
-            inicio_mes_str = agora_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
+            inicio_mes_str = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
             cursor.execute("SELECT SUM(valor) FROM transacoes WHERE id_usuario = ? AND id_categoria = ? AND tipo = 'saida' AND data_transacao >= ?", (user_id, categoria_id, inicio_mes_str))
             gasto_total_mes = cursor.fetchone()[0] or 0.0
             percentual = (gasto_total_mes / orcamento_valor) * 100
@@ -525,10 +652,28 @@ async def registrar_transacao_final(update: Update, context: ContextTypes.DEFAUL
             if gasto_total_mes > orcamento_valor:
                 mensagem_orcamento += "\n⚠️ *Atenção: Você ultrapassou o orçamento para esta categoria!*"
 
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
+    
     if is_scheduled:
-        await context.bot.send_message(chat_id=context.job.chat_id, text=f"✅ Gasto agendado de '{nome_categoria}' (R$ {valor:.2f}) foi registrado automaticamente.{mensagem_orcamento}", parse_mode='Markdown')
+        await context.bot.send_message(chat_id=context.job.chat_id, text=f"✅ Gasto agendado de '{nome_categoria.capitalize()}' (R$ {valor:.2f}) foi registrado automaticamente.{mensagem_orcamento}", parse_mode='Markdown')
         return
+    
+    respostas_possiveis = [f"✅ Anotado!", f"Ok, registrado! 👍", f"Prontinho!", f"Na conta! 📝"]
+    mensagem = random.choice(respostas_possiveis)
+    detalhes_msg = f"\n**Categoria:** {nome_categoria.capitalize()}\n**Valor:** R$ {valor:.2f}"
+    
+    if id_cartao:
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("SELECT nome FROM cartoes WHERE id = ?", (id_cartao,)); nome_cartao = cursor.fetchone()[0]; conn.close()
+        detalhes_msg += f"\n**Cartão:** {nome_cartao}"
+        
+    mensagem += detalhes_msg + mensagem_sequencia + mensagem_orcamento
+    keyboard = [[InlineKeyboardButton("↩️ Desfazer", callback_data=f"undo:{new_transaction_id}")]]
+    
+    target_message = update.callback_query.message if (update and update.callback_query) else (update.message if update else None)
+    if target_message:
+        await target_message.reply_text(text=mensagem, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
     
     respostas_possiveis = [f"✅ Anotado!", f"Ok, registado! 👍", f"Prontinho!", f"Na conta! 📝"]
     mensagem = random.choice(respostas_possiveis)
